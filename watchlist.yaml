@@ -1,0 +1,36 @@
+# 軍師系統持股清單 (watchlist.yaml)
+# 編輯後 sentinel 會自動重載（不需重啟 plist）
+# 欄位說明：
+#   symbol      股票代號（必填）
+#   name        股票名稱（顯示用）
+#   cost        進場加權平均成本（觸發損益參考）
+#   shares      持股張數*1000（計算部位用）
+#   sector      類股（影響 RAG 知識挑選）
+#   notes       備註（主軸策略/觀察重點）
+
+stocks:
+  - symbol: "2883"
+    name: "凱基金"
+    cost: 0          # v0.2 限制:尚未填入實際進場均價(本輪不動)
+    shares: 0        # v0.2 限制:尚未填入實際持股張數(本輪不動)
+    sector: "金控"
+    notes: "🟡籌碼主軸，壽險+證券為主力"
+
+  - symbol: "2330"
+    name: "台積電"
+    cost: 0          # v0.2 限制:尚未填入實際進場均價(本輪不動)
+    shares: 0        # v0.2 限制:尚未填入實際持股張數(本輪不動)
+    sector: "半導體"
+    notes: "🟢趨勢主軸，外資+法人連買追蹤"
+
+# 軍師設定（不需每日改）
+config:
+  mode: "paper"                    # paper=純模擬 / live=真倉（Phase 4 之後再開）
+  trigger_severity: "conservative"  # conservative / aggressive / fanatic
+  cooldown_seconds: 300            # 同訊號冷卻（秒）
+  daily_api_limit: 50              # 每日 LLM 呼叫上限
+  monthly_budget_alert: 1000       # 每月超過此值通知 Kevin
+  market_open: "09:00"
+  market_close: "13:30"
+  sentinel_log_dir: "./logs/"
+  state_dir: "./state/"

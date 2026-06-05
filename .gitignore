@@ -1,0 +1,42 @@
+# === 敏感設定 ===
+.env
+.env.local
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+
+# === 軍師系統本地狀態 ===
+state/
+logs/*.log
+logs/*.json
+!logs/.gitkeep
+reports/*.md
+reports/*.json
+
+# === Shioaji SDK 自動產生 ===
+shioaji.log
+
+# === 文件 / AI 記憶(個人化,不入 repo) ===
+llms-full.txt
+COUNSELOR_MEMORY.md
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# === IDE / OS ===
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
