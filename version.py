@@ -4,7 +4,7 @@
 
 __version__      = "1.0.0"
 __release_date__ = "2026-06-06"
-__description__  = "凱基金盤中 AI 軍師系統 — 即時 tick 監控 + LLM 分析 + Telegram 推播"
+__description__  = "台股軍師 — 即時 tick 監控 + LLM 分析 + Telegram 推播"
 __author__       = "Kevin Tsou"
 
 # 語意化版本說明
