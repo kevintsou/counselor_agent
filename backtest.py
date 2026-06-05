@@ -1,7 +1,7 @@
 """
-軍師 v7 正式回測腳本 v2 (backtest_v7.py)
-用 Shioaji get_ticks() 抓 5 個交易日全 ticks,重播進 v7 on_tick 流程
-統計 R1/R3 觸發 + cooldown 過濾 + LLM 呼叫 + Telegram 推播
+軍師系統 — 回測腳本 (backtest.py)
+用 Shioaji get_ticks() 抓多個交易日全 ticks,重播進 on_tick 流程
+統計 R1/R2/R3/R4 觸發 + cooldown 過濾,驗證策略參數
 
 v2 改進(2026-06-04):
   - 用真實 ts(從 rd["ts"])餵 feed(),讓 R3 cooldown 真正生效

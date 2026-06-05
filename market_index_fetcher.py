@@ -1,5 +1,5 @@
 """
-軍師系統 — 大盤指數抓取 (market_index_fetcher.py) v6.1
+軍師系統 — 大盤指數抓取 (market_index_fetcher.py)
 改用 TWSE openapi FMTQIK(免費、免登入、穩定)
 
 端點:

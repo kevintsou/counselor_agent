@@ -1,22 +1,19 @@
 """
-軍師系統 — 軍師子進程 (strategist.py) v7
+軍師系統 — 軍師子進程 (strategist.py)
 專責:LLM 呼叫 + Telegram 推播
 
-【架構改動】2026-06-04
-原 v6 把 on_tick → ask_strategist 拆成 thread + Queue,但 Python GIL
-跟 Shioaji tokio runtime 互搶導致主執行緒卡死,背景 worker 拿不到 GIL。
-改用 multiprocessing:子進程有獨立 GIL,絕對不會跟主進程搶。
+子進程透過 multiprocessing.Queue 接收 sentinel 推來的觸發任務,
+在獨立 GIL 中執行 LLM 分析與 Telegram 推播,不與 Shioaji 搶鎖。
 
-【訊息格式】
 從父進程接收的 task dict:
 {
     "symbol": str,
-    "sig": str,           # e.g. "R3"
-    "detail": dict,       # 觸發條件明細
+    "sig": str,       # "R1" / "R2" / "R3" / "R4" / "COMBO"
+    "detail": dict,   # 觸發條件明細(窗口/張數/市值等)
     "qty": int,
-    "side": str,
+    "side": str,      # "buy" / "sell" / "unknown"
     "price": float,
-    "ts": str,            # ISO 格式時間戳
+    "ts": str,        # ISO 格式時間戳
 }
 """
 import logging
@@ -68,7 +65,8 @@ def run_forever(task_queue: Queue):
 
     失敗一律 catch,絕不 crash(整個 child 死了 sentinel 就不會再有推播)。
     """
-    log.info("🧠 strategist 子進程啟動(PID=%d)", os.getpid())
+    from version import __version__
+    log.info("🧠 strategist 子進程啟動 v%s (PID=%d)", __version__, os.getpid())
 
     # 延遲 import(避免跟 sentinel 同時 load Shioaji)
     try:

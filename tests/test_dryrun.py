@@ -1,5 +1,5 @@
 """
-軍師系統 v7 正式模擬測試 (test_v7_dryrun.py)
+軍師系統 — End-to-End 模擬測試 (tests/test_dryrun.py)
 用 Shioaji ticks() 抓指定交易日全日 ticks,重放到 sentinel on_tick callback,
 驗證完整流程：偵測 → Queue → 子進程 → LLM → Telegram。
 
@@ -28,7 +28,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
-log = logging.getLogger("counselor.test_v7")
+log = logging.getLogger("counselor.test")
 
 
 # ── 最近交易日（週末往前推）────────────────────────────────────────────

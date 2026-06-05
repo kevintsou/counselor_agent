@@ -1,5 +1,5 @@
 """
-軍師系統 — TWSE 公開資料抓取 (twse_fetcher.py) v6.1
+軍師系統 — TWSE 公開資料抓取 (twse_fetcher.py)
 全部改用 openapi.twse.com.tw(免費、免登入、CORS 友善)
 
 端點:

@@ -1,17 +1,18 @@
 """
 軍師系統 — 偵查兵 (sentinel.py)
 ============================
-角色：盤中即時監控 watchlist 個股,偵測 Kevin 指定觸發策略
+角色：盤中即時監控 watchlist 個股,偵測進場觸發策略
 
-觸發策略 v2 (2026-06-03 重寫):
-  1. 進場快攻(任一):
-     - 5秒內 50張↑買單 累積 ≥ 5 筆
-     - 30秒內 100張買單 ≥ 10 筆
-  2. 淨買盤訊號:
-     - 60秒內 買單總量 - 賣單總量 > (1000*25)/成交價 (= 25 萬市值)
+觸發策略:
+  R1 快攻:5 秒內 ≥ 50 張買單 ≥ 5 筆
+  R2 快攻:30 秒內 ≥ 100 張買單 ≥ 10 筆
+  R3 淨買:60 秒內 淨買張數 > 100000 / 成交價(約 1 億市值)
+  R4 計分:60 秒內 大單買賣差分 counter > 20
 
 呼叫鏈:
-   Shioaji Tick → StrategyDetector → 🔴 觸發 → 軍師總司令 LLM → Telegram
+   Shioaji TickSTKv1 → on_tick → StrategyDetector
+   → CooldownGate → multiprocessing.Queue
+   → strategist(子進程) → LLM → Telegram
 """
 import logging
 import os
@@ -33,6 +34,7 @@ load_dotenv(Path(__file__).parent / ".env")
 # 注意:LLM(llm_client)/Telegram(herald)由 strategist 子進程處理,
 # 父進程只需 broker;send_alert 在用到的地方各自 local import。
 from broker import broker
+from version import __version__
 
 # ===== 設定 =====
 ROOT = Path(__file__).parent
@@ -171,30 +173,26 @@ class StrategyDetector:
         if r4_hit: triggered.append("R4"); detail_map["R4"] = r4_detail
 
         if triggered:
-            # R3 cooldown:同 symbol 5 分鐘內不重複觸發 R3(避免同波大單連發)
-            # v7.0.1 修:cooldown 過濾後也要更新 last_r3_ts,否則下次又會被放行
+            # R3 冷卻:同 symbol COOLDOWN 秒內不重複觸發,避免同波大單連發
+            # 不論成功放行或被擋下,都推進 last_r3_ts:
+            #   成功 → 記錄本次時間,下次需再隔 COOLDOWN 秒
+            #   擋下 → 持續延後,防止同波大單在冷卻期邊界反覆放行
             if "R3" in triggered:
                 last_r3 = self._last_r3_ts.get(symbol, 0)
                 if ts_epoch - last_r3 < self.R3_COOLDOWN_SEC:
                     log.debug(f"  ⏸️  R3 cooldown {symbol} 剩 {self.R3_COOLDOWN_SEC - (ts_epoch-last_r3):.0f}s")
                     triggered.remove("R3")
                     detail_map.pop("R3", None)
-                # ⚠️ 重要:不論成功觸發或被 cooldown 擋下,都要推進 last_r3_ts
-                #   成功 → 記錄本次觸發時間,下次需再隔 COOLDOWN 秒
-                #   擋下 → 延後下次放行(同波大單連發時持續延後)
                 self._last_r3_ts[symbol] = ts_epoch
-                # 只在真正放行(沒被冷卻擋下)時才記 R3 命中,避免 log 噪音
                 if "R3" in triggered:
                     d = detail_map["R3"]
                     log.info(
                         f"  💰 R3 觸發 {symbol}:淨買 {d['net_lots']} 張 > 門檻 "
                         f"{d['threshold_lots']:.0f} 張 (市值約 ${d['market_value_twd']:,.0f})"
                     )
-            # 只清超過 R1 window 的舊資料,保留近期資料以防 R2/R3 接續觸發
-            # 但避免同一規則在 window 內重複觸發:R1 / R2 觸發後清空,R3 保留以利多次觸發
-            # v7.0.1 修:R3 觸發時也清 buf,避免 R1 清空後 R3 又連環觸發
-            if "R1" in triggered or "R2" in triggered or "R4" in triggered or "R3" in triggered:
-                buf.clear()  # v7.0.1:全部觸發都清空,避免互搶
+            # 任一規則觸發後清空 buffer,避免同波數據被多個規則重複計算
+            if triggered:
+                buf.clear()
             if not triggered:
                 return "", {}
             detail_map["rule"] = "+".join(triggered)
@@ -367,9 +365,7 @@ detector = StrategyDetector()
 
 # Watchdog 全域狀態(module level,on_tick 可直接寫)
 _LAST_TICK_TS: dict[str, datetime] = {}
-# v7 (2026-06-04 13:55):改用 multiprocessing.Queue
-# 原因:threading.Queue + threading 會跟 Shioaji tokio runtime 搶 GIL
-# 子進程完全獨立 GIL,絕不互搶
+# multiprocessing.Queue:strategist 子進程有獨立 GIL,不會與 Shioaji tokio runtime 搶鎖
 import multiprocessing
 _TRIGGER_QUEUE: multiprocessing.Queue = multiprocessing.Queue(maxsize=100)
 _STRATEGIST_PROC: multiprocessing.Process | None = None
@@ -494,7 +490,7 @@ class Sentinel:
         self._last_health_check: datetime | None = None
         self._consecutive_reconnect_fails: int = 0
         self._last_alert_ts: dict[str, datetime] = {}  # 避免 alert 轟炸
-        log.info(f"🧭 偵查兵啟動,監控 {len(self.stocks)} 檔(策略 v2)")
+        log.info(f"🧭 軍師系統 v{__version__} 啟動,監控 {len(self.stocks)} 檔")
 
     def stop(self, *_):
         log.info("🛑 收到停止訊號")
@@ -650,7 +646,6 @@ class Sentinel:
                 pass  # herald 還沒載入也別讓 sentinel 死
             return
 
-        # v7 (2026-06-04 14:00):启动 strategist 子進程(獨立 GIL)
         global _STRATEGIST_PROC
         _STRATEGIST_PROC = _spawn_strategist()
 
