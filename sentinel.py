@@ -365,6 +365,8 @@ detector = StrategyDetector()
 
 # Watchdog 全域狀態(module level,on_tick 可直接寫)
 _LAST_TICK_TS: dict[str, datetime] = {}
+# 每檔最新成交價(由 on_tick 維護,供 PriceMonitor 讀取)
+_LAST_PRICE: dict[str, float] = {}
 # multiprocessing.Queue:strategist 子進程有獨立 GIL,不會與 Shioaji tokio runtime 搶鎖
 import multiprocessing
 _TRIGGER_QUEUE: multiprocessing.Queue = multiprocessing.Queue(maxsize=100)
@@ -418,7 +420,7 @@ def on_tick(exchange, tick):
     """
     try:
         symbol = str(tick.code)
-        # 記錄最後 tick 時間(供 watchdog 判斷,即使沒觸發也記)
+        # 記錄最後 tick 時間與成交價(供 watchdog / PriceMonitor 讀取)
         _LAST_TICK_TS[symbol] = datetime.now()
         qty = int(getattr(tick, "volume", 0) or 0)
         # Shioaji TickSTKv1.tick_type 區分買賣主動方:
@@ -432,6 +434,8 @@ def on_tick(exchange, tick):
         else:
             side = "unknown"  # 0/None/其他 → 不歸類買賣
         price = float(getattr(tick, "close", 0) or 0)
+        if price > 0:
+            _LAST_PRICE[symbol] = price   # PriceMonitor 用
         ts = datetime.now()
 
         # 偵測觸發(回傳 (signal, detail) tuple)
@@ -476,21 +480,26 @@ _COOLDOWN_GATE = CooldownGate(seconds=300)
 
 # ===== 主迴圈 =====
 class Sentinel:
-    # Watchdog 設定(2026-06-04 補)
-    HEALTH_CHECK_SEC = 10       # 每 10s ping 一次 broker(原本 30s,太慢)
-    NO_TICK_ALERT_SEC = 60      # 60s 沒 tick 就告警(可能斷線或冷門股)
+    # Watchdog 設定
+    HEALTH_CHECK_SEC    = 10    # 每 10s 跑一次 health check
+    NO_TICK_ALERT_SEC   = 60    # 60s 沒 tick 就告警
     MAX_RECONNECT_FAILS = 3     # 連續重連失敗 N 次發 alert
+    # PriceMonitor 設定
+    PRICE_MONITOR_SEC   = 30    # 每 30s 對比一次成交價
 
     def __init__(self):
         self.stocks = load_watchlist()
         self._running = True
-        # watchlist 熱重載:記住檔案 mtime,變更時自動 re-subscribe
+        # watchlist 熱重載
         self._watchlist_mtime = WATCHLIST.stat().st_mtime if WATCHLIST.exists() else 0.0
         # Watchdog 狀態
         self._last_health_check: datetime | None = None
         self._consecutive_reconnect_fails: int = 0
-        self._last_alert_ts: dict[str, datetime] = {}  # 避免 alert 轟炸
-        log.info(f"🧭 軍師系統 v{__version__} 啟動,監控 {len(self.stocks)} 檔")
+        self._last_alert_ts: dict[str, datetime] = {}
+        # PriceMonitor 狀態
+        self._price_snap: dict[str, float] = {}   # 上次快照的成交價 {symbol: price}
+        self._last_price_check: float = 0.0        # 上次快照的 epoch time
+        log.info(f"🧭 台股軍師 v{__version__} 啟動,監控 {len(self.stocks)} 檔")
 
     def stop(self, *_):
         log.info("🛑 收到停止訊號")
@@ -541,6 +550,53 @@ class Sentinel:
                 log.info(f"♻️ watchlist 已重載(+{len(added)} / -{len(removed)}),現監控 {len(self.stocks)} 檔")
         except Exception as e:
             log.error(f"  ❌ watchlist 重載失敗: {e}")
+
+    def _do_price_monitor(self):
+        """每 30 秒對比一次各檔成交價，有漲跌立即推 Telegram（不走 LLM）。
+
+        邏輯：
+          - 讀取 _LAST_PRICE（on_tick 即時更新）
+          - 與 _price_snap（上一次快照）比較
+          - 漲 → 📈  跌 → 📉  直接呼叫 herald.send()
+          - 第一次快照只記錄，不推播（沒有比較基準）
+        """
+        now_str = datetime.now().strftime("%H:%M:%S")
+        try:
+            from herald import send_price_alert
+        except Exception as e:
+            log.error(f"PriceMonitor herald import 失敗: {e}")
+            return
+
+        for s in self.stocks:
+            sym  = s["symbol"]
+            name = s.get("name", sym)
+            curr = _LAST_PRICE.get(sym)
+
+            if curr is None or curr <= 0:
+                continue   # 還沒收到任何 tick
+
+            prev = self._price_snap.get(sym)
+            if prev is None:
+                # 首次快照：只記錄，不推播
+                self._price_snap[sym] = curr
+                log.debug(f"  📸 PriceMonitor 首次快照 {sym} @ {curr}")
+                continue
+
+            if curr == prev:
+                continue   # 價格未變，安靜
+
+            diff = curr - prev
+            pct  = diff / prev * 100
+            icon = "📈" if diff > 0 else "📉"
+            sign = "+" if diff > 0 else ""
+            log.info(f"  {icon} PriceMonitor {sym} {prev} → {curr} ({sign}{pct:.2f}%)")
+            try:
+                send_price_alert(sym, name, prev, curr, now_str)
+            except Exception as e:
+                log.error(f"  ❌ PriceMonitor 推播失敗({sym}): {e}")
+
+            # 無論推播成功與否，更新快照
+            self._price_snap[sym] = curr
 
     def _do_health_check(self):
         """Watchdog 主體(v8):tick 流量被動偵測 + Shioaji session 狀態感知。
@@ -682,10 +738,16 @@ class Sentinel:
                     if not self._running:
                         break
                     continue
-                # 開盤中:每 1s 醒一次,每 30s 跑 watchdog
+                # 開盤中:每 1s 醒一次
+                now_epoch = time.time()
+                # health check (每 10s)
                 if self._last_health_check is None or \
                    (datetime.now() - self._last_health_check).total_seconds() >= self.HEALTH_CHECK_SEC:
                     self._do_health_check()
+                # price monitor (每 30s)
+                if now_epoch - self._last_price_check >= self.PRICE_MONITOR_SEC:
+                    self._do_price_monitor()
+                    self._last_price_check = now_epoch
                 time.sleep(1)
         finally:
             broker.disconnect()
