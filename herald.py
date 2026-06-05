@@ -100,22 +100,27 @@ def send_alert(level: str, msg: str) -> bool:
     return send(f"{emoji} {msg}")
 
 
-def send_price_alert(symbol: str, name: str, prev: float, curr: float, ts: str) -> bool:
+def send_price_alert(symbol: str, name: str, prev: float, curr: float,
+                     ts: str, ticks_moved: int = 0) -> bool:
     """推播成交價變動通知（每 30 秒 PriceMonitor 呼叫，不走 LLM）。
 
+    觸發條件：變動達 ≥ 2 檔（依 TWSE 升降單位）。
+
     Args:
-        symbol: 股票代號
-        name:   股票名稱
-        prev:   上次快照成交價
-        curr:   本次成交價
-        ts:     時間字串 HH:MM:SS
+        symbol:      股票代號
+        name:        股票名稱
+        prev:        上次快照成交價
+        curr:        本次成交價
+        ts:          時間字串 HH:MM:SS
+        ticks_moved: 移動了幾檔（顯示用）
     """
     diff = curr - prev
     pct  = diff / prev * 100 if prev > 0 else 0
     icon = "📈" if diff > 0 else "📉"
     sign = "+" if diff > 0 else ""
+    tick_str = f"  {ticks_moved} 檔" if ticks_moved else ""
     msg = (
-        f"{icon} *{symbol} {name}*  成交價變動\n"
+        f"{icon} *{symbol} {name}*  成交價變動{tick_str}\n"
         f"`{prev:.2f}` → `{curr:.2f}`  "
         f"({sign}{diff:.2f} / {sign}{pct:.2f}%)\n"
         f"⏰ {ts}"

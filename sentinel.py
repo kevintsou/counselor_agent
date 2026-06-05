@@ -551,13 +551,45 @@ class Sentinel:
         except Exception as e:
             log.error(f"  ❌ watchlist 重載失敗: {e}")
 
+    @staticmethod
+    def _tick_size(price: float) -> float:
+        """台股升降單位（檔位）— 依 TWSE 規定。
+
+        價格區間      每檔跳動
+        ─────────────────────
+        < 10          0.01
+        10 – 50       0.05
+        50 – 100      0.10
+        100 – 500     0.50
+        500 – 1000    1.00
+        ≥ 1000        5.00
+        """
+        if price < 10:
+            return 0.01
+        elif price < 50:
+            return 0.05
+        elif price < 100:
+            return 0.10
+        elif price < 500:
+            return 0.50
+        elif price < 1000:
+            return 1.00
+        else:
+            return 5.00
+
     def _do_price_monitor(self):
-        """每 30 秒對比一次各檔成交價，有漲跌立即推 Telegram（不走 LLM）。
+        """每 30 秒對比一次各檔成交價，變動達 ≥ 2 檔才推 Telegram（不走 LLM）。
+
+        「2 檔」= 2 × tick_size(prev_price)，依 TWSE 升降單位計算。
+        例：凱基金 @ 25.5 → tick=0.05 → 門檻=0.10
+            台積電 @ 920  → tick=1.00 → 門檻=2.00
 
         邏輯：
           - 讀取 _LAST_PRICE（on_tick 即時更新）
           - 與 _price_snap（上一次快照）比較
-          - 漲 → 📈  跌 → 📉  直接呼叫 herald.send()
+          - |diff| < 2 × tick_size → 安靜（過濾雜訊）
+          - |diff| ≥ 2 × tick_size → 漲 📈 / 跌 📉 推 Telegram
+          - 快照永遠更新（下次繼續以最新價為基準，即使這次沒推）
           - 第一次快照只記錄，不推播（沒有比較基準）
         """
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -582,21 +614,27 @@ class Sentinel:
                 log.debug(f"  📸 PriceMonitor 首次快照 {sym} @ {curr}")
                 continue
 
-            if curr == prev:
-                continue   # 價格未變，安靜
+            diff      = curr - prev
+            threshold = 2 * self._tick_size(prev)
 
-            diff = curr - prev
+            # 快照永遠更新（無論是否推播），下次以最新價為基準
+            self._price_snap[sym] = curr
+
+            if abs(diff) < threshold - 1e-9:
+                continue   # 變動不到 2 檔，不通知
+
             pct  = diff / prev * 100
             icon = "📈" if diff > 0 else "📉"
             sign = "+" if diff > 0 else ""
-            log.info(f"  {icon} PriceMonitor {sym} {prev} → {curr} ({sign}{pct:.2f}%)")
+            ticks_moved = round(abs(diff) / self._tick_size(prev))
+            log.info(
+                f"  {icon} PriceMonitor {sym} {prev} → {curr} "
+                f"({sign}{pct:.2f}%  {ticks_moved} 檔  門檻={threshold})"
+            )
             try:
-                send_price_alert(sym, name, prev, curr, now_str)
+                send_price_alert(sym, name, prev, curr, now_str, ticks_moved)
             except Exception as e:
                 log.error(f"  ❌ PriceMonitor 推播失敗({sym}): {e}")
-
-            # 無論推播成功與否，更新快照
-            self._price_snap[sym] = curr
 
     def _do_health_check(self):
         """Watchdog 主體(v8):tick 流量被動偵測 + Shioaji session 狀態感知。
