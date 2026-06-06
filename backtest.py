@@ -2,10 +2,6 @@
 軍師系統 — 回測腳本 (backtest.py)
 用 Shioaji get_ticks() 抓多個交易日全 ticks,重播進 on_tick 流程
 統計 R1/R2/R3/R4 觸發 + cooldown 過濾,驗證策略參數
-
-v2 改進(2026-06-04):
-  - 用真實 ts(從 rd["ts"])餵 feed(),讓 R3 cooldown 真正生效
-  - 不走 on_tick(datetime.now()),直接呼叫 detector.feed
 """
 import logging
 import os
@@ -13,6 +9,8 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import yaml
 
 _ROOT = Path(__file__).parent
 sys.path.insert(0, str(_ROOT))
@@ -25,8 +23,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("counselor.backtest")
 
-# 回測設定
-SYMBOLS = ["2883", "2330"]  # 凱基金 + 台積電
+
+def _load_symbols() -> list[str]:
+    """從 watchlist.yaml 讀取回測標的，跟 sentinel 保持同一份清單。"""
+    wl = _ROOT / "watchlist.yaml"
+    if not wl.exists():
+        log.error(f"找不到 watchlist.yaml: {wl}")
+        return []
+    with open(wl, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return [s["symbol"] for s in data.get("stocks", [])]
+
+
+# 回測設定（標的從 watchlist.yaml 動態讀取）
+SYMBOLS   = _load_symbols()
 DAYS_BACK = 5  # 5 個交易日
 # 加速:每筆 ticks = 0.05 秒(20x 加速,真實 1.6s/筆 → 0.08s/筆)
 # 5 秒視窗(R1) = 100 筆 ticks,密度約為真實的 20 倍
@@ -128,7 +138,7 @@ def replay_symbol_on_day(detector, queue, symbol: str, rd: dict) -> dict:
 
 def run_backtest():
     log.info("=" * 60)
-    log.info(f"🧪 軍師 v7 正式回測 v3 — 過去 {DAYS_BACK} 個交易日 × {len(SYMBOLS)} 檔(加速 {1.6/TICK_INTERVAL:.0f}x)")
+    log.info(f"🧪 台股軍師 回測 — 過去 {DAYS_BACK} 個交易日 × {len(SYMBOLS)} 檔(加速 {1.6/TICK_INTERVAL:.0f}x)")
     log.info("=" * 60)
 
     from sentinel import detector, _TRIGGER_QUEUE
@@ -184,7 +194,7 @@ def run_backtest():
 
     log.info("")
     log.info("=" * 60)
-    log.info("📊 回測報告(5 個交易日 × 2 檔)")
+    log.info(f"📊 回測報告({DAYS_BACK} 個交易日 × {len(SYMBOLS)} 檔)")
     log.info("=" * 60)
     log.info(f"總 ticks:          {grand_total['tick_count']:>10,}")
     log.info(f"R1 觸發:           {grand_total['r1_count']:>10,}")
