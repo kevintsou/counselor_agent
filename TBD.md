@@ -88,25 +88,10 @@ TELEGRAM_CHAT_ID=8432968775       # Kevin 的 chat_id 不變
 
 ---
 
-## ✅ TBD 2. 補 ARCHITECTURE.md 的 PriceMonitor baseline 條目 [優先序: 低]
+## ~~✅ TBD 2. 補 ARCHITECTURE.md 的 PriceMonitor baseline 條目~~ **[已完成 2026-06-08]**
 
-### 問題
-2026-06-08 改了 `sentinel.py` 的 PriceMonitor baseline 機制（觸發後才更新基準、初始快照留空），但**沒補對應的設計意圖到 ARCHITECTURE.md**。COUNSELOR_MEMORY.md 有提到但已 gitignore（不入 repo），所以接手的人看不到完整決策脈絡。
-
-**註**: 此條目已於 2026-06-08 commit 進 sentinel.py（docstring 內），但 ARCHITECTURE.md 的「PriceMonitor 段落」可能還沒同步。接手時請檢查。
-
-### 修法
-在 `ARCHITECTURE.md` 的 PriceMonitor 段落加：
-```markdown
-### PriceMonitor baseline 機制 (2026-06-08 拍板)
-- 初始快照留空,等第一筆 tick 來時設為基準(**不推播**)
-- 變動 ≥ 4 檔 → 觸發 alert + 把現價寫成新 baseline
-- 變動 < 4 檔 → 沿用舊 baseline(不更新,避免被 30 秒雜訊洗版)
-- **不要從 watchlist.yaml 的 `cost` 載入**(成本價不是前日收盤,語意不對)
-```
-
-### 動手前確認
-- [ ] 先讀 ARCHITECTURE.md 看 PriceMonitor 段落現在寫什麼,再決定要補在哪
+`ARCHITECTURE.md` 新增「📡 PriceMonitor baseline 機制」段落，說明初始留空、4 檔門檻觸發才更新基準、台股升降單位表、不從 watchlist cost 讀初始值。
+commit: `b37a0cc`
 
 ---
 
@@ -127,18 +112,11 @@ rm /Users/kjkin2006/.openclaw/workspace/scripts/last_alert_price.json.bak
 
 ---
 
-## ✅ TBD 4. `sentinel.py` 內的 sentinel.log 沒 log rotation [優先序: 中]
+## ~~✅ TBD 4. `sentinel.py` 內的 sentinel.log 沒 log rotation~~ **[已完成 2026-06-08]**
 
-### 問題
-`logs/sentinel.log` 已經長到 425 KB（2026-06-08 觀察），沒做 log rotation。長期會吃磁碟。
-
-### 修法
-**選項 A**: 在 sentinel.py 啟動時用 Python `logging.handlers.RotatingFileHandler`，單檔 10 MB,保留 5 個備份。
-**選項 B**: 用 launchd 把 log 輸出到 `newsyslog` 管理的位置（macOS 原生 log rotation）。
-**選項 C**: 寫個 cron job 每天 00:00 清 log。
-
-### 動手前確認
-- [ ] 跟 Kevin 確認要哪個選項 + log 保留多久
+改用 `logging.handlers.RotatingFileHandler`，單檔 10 MB，保留 5 個備份。
+重啟 sentinel 後自動生效，無需任何手動操作。
+commit: `b37a0cc`
 
 ---
 
@@ -152,6 +130,25 @@ rm /Users/kjkin2006/.openclaw/workspace/scripts/last_alert_price.json.bak
 
 ### 動手前確認
 - [ ] 跟 Kevin 確認可接受停機時間
+
+---
+
+## ~~✅ TBD 6. 程式碼掃描修正：8 個運行期 bug~~ **[已完成 2026-06-08]**
+
+2026-06-08 對全專案做靜態掃描，發現 `backtrack.py` / `herald.py` / `indicators.py` / `twse_fetcher.py` 共 8 個 bug，全部已修。
+
+| # | 檔案 | 行號 | 問題描述 | 影響 |
+|---|---|---|---|---|
+| 1 | `backtrack.py` | 59 | `get_client()` 不存在於 `llm_client`，改為直接建 OpenAI client | 執行必 crash |
+| 2 | `backtrack.py` | 76 | `import os` 錯位於函式定義後，一併移除（fix 1 後 os 已不需要） | 程式碼混亂 |
+| 3 | `backtrack.py` | 342 | `fetch_institutional` 不存在（正確名稱 `fetch_institutional_3instit`）且多傳 symbol 參數 | 執行必 crash |
+| 4 | `backtrack.py` | 366 | `send_telegram` 不存在（正確名稱 `safe_send`） | 執行必 crash |
+| 5 | `backtrack.py` | 283–287 | md 報告三大法人表格用不存在的鍵（`foreign_buy` 等），全部輸出 0 | 靜默錯誤資料 |
+| 6 | `twse_fetcher.py` | 163 | `load_institutional` 回傳 `{buy_amount, net_amount}`，但 `calc_institutional_indicators` 讀 `{buy, net}`，DB 讀回後法人指標永遠為 0 | 靜默錯誤資料 |
+| 7 | `indicators.py` | 333–351 | `__main__` 呼叫不存在的 `load_market_index` / `load_txf_oi`；`load_institutional` 多傳 symbol；`calc_all` 第 6 參數傳未定義的 `oi` | 直接執行必 crash |
+| 8 | `herald.py` | 37 | `parse_mode=None` 被 `urlencode` 序列化為字串 `"None"` 送出，Telegram API 報錯 | 訊息靜默失敗 |
+
+commit: `c040034`
 
 ---
 
