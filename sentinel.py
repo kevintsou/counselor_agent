@@ -499,6 +499,13 @@ class Sentinel:
         # PriceMonitor 狀態
         self._price_snap: dict[str, float] = {}   # 上次快照的成交價 {symbol: price}
         self._last_price_check: float = 0.0        # 上次快照的 epoch time
+
+        # ✅ Kevin 2026-06-08 拍板:不從 watchlist 的 cost 拿初始快照
+        # 理由:cost 是進場成本價,不是前日收盤,用來當 baseline 語意不對
+        # 改成:price_snap 留空,等第一筆 tick 來時在 _do_price_monitor 內設定(不推播)
+        # 之後只在 alert 觸發時才更新(2026-06-08 baseline 機制)
+        log.info(f"  📸 PriceMonitor 初始快照:留空,等第一筆 tick 來時記錄")
+
         log.info(f"🧭 台股軍師 v{__version__} 啟動,監控 {len(self.stocks)} 檔")
 
     def stop(self, *_):
@@ -586,11 +593,11 @@ class Sentinel:
 
         邏輯：
           - 讀取 _LAST_PRICE（on_tick 即時更新）
-          - 與 _price_snap（上一次快照）比較
-          - |diff| < 4 × tick_size → 安靜（過濾雜訊）
-          - |diff| ≥ 4 × tick_size → 漲 📈 / 跌 📉 推 Telegram
-          - 快照永遠更新（下次繼續以最新價為基準，即使這次沒推）
-          - 第一次快照只記錄，不推播（沒有比較基準）
+          - 與 _price_snap（**上一次 alert 觸發時的價**）比較
+          - |diff| < 4 × tick_size → 安靜（過濾雜訊,快照不變)
+          - |diff| ≥ 4 × tick_size → 漲 📈 / 跌 📉 推 Telegram + **把現價寫成新基準**
+          - 第一次快照只記錄，不推播（沒有比較基準)
+          - **2026-06-08 拍板:快照只有在 alert 觸發時才更新,沒觸發則沿用「上次 alert 的價」**
         """
         now_str = datetime.now().strftime("%H:%M:%S")
         try:
@@ -617,11 +624,12 @@ class Sentinel:
             diff      = curr - prev
             threshold = 4 * self._tick_size(prev)
 
-            # 快照永遠更新（無論是否推播），下次以最新價為基準
-            self._price_snap[sym] = curr
-
             if abs(diff) < threshold - 1e-9:
-                continue   # 變動不到 4 檔，不通知
+                continue   # 變動不到 4 檔，不通知,快照不更新(沿用上次 alert 的價)
+
+            # ✅ Kevin 2026-06-08 拍板:只有觸發 alert 才更新基準
+            # 沒觸發 → 快照保持不變,下次仍以「上次 alert 的價」為基準
+            self._price_snap[sym] = curr
 
             pct  = diff / prev * 100
             icon = "📈" if diff > 0 else "📉"
