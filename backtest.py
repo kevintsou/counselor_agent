@@ -84,17 +84,15 @@ def replay_symbol_on_day(detector, queue, symbol: str, rd: dict) -> dict:
         "r3_count": 0,
         "other_count": 0,
         "sent_to_subproc": 0,
-        "filtered_by_cooldown": 0,
+        "dropped_queue_full": 0,
     }
-    triggers: list = []  # 先收 list,replay 完再一次 put queue(避免 feeder lock 衝突)
-    triggers: list = []  # v3.1:改用 list,跑完再 put queue
+    triggers: list = []
 
     n = len(rd["ts"])
     # 用真實 ticks ts(如果可用)或 idx(若 Shioaji 模擬環境 ts 不規律)
     # v3 改:就用「真實 wall clock」+「每筆 sleep」,讓 R3 cooldown 60 秒真的走過
     # 2883 一日約 10000 筆,真實 270 分鐘 → 每筆間距 1.6 秒
     # 加速 100x → sleep 0.016s/筆
-    TICK_INTERVAL = 0.05  # 20x 加速(與 module 一致)
     base_ts = time.time()  # 從現在開始的 wall clock
 
     for i in range(n):
@@ -102,7 +100,12 @@ def replay_symbol_on_day(detector, queue, symbol: str, rd: dict) -> dict:
         real_ts = datetime.fromtimestamp(base_ts + i * TICK_INTERVAL)
         qty = int(rd["volume"][i])
         tick_type = rd.get("tick_type", [0] * n)[i] or 0
-        side = "buy" if tick_type in (1, "1", "Buy") else "sell"
+        if tick_type in (1, "1", "Buy"):
+            side = "buy"
+        elif tick_type in (2, -1, "2", "-1", "Sell"):
+            side = "sell"
+        else:
+            side = "unknown"
         price = float(rd["close"][i])
 
         sig, detail = detector.feed(symbol, real_ts, qty, side, price)
@@ -132,7 +135,7 @@ def replay_symbol_on_day(detector, queue, symbol: str, rd: dict) -> dict:
             queue.put_nowait(t)
             stats["sent_to_subproc"] += 1
         except Exception:
-            stats["filtered_by_cooldown"] += 1
+            stats["dropped_queue_full"] += 1
     return stats
 
 
@@ -158,7 +161,7 @@ def run_backtest():
         "r3_count": 0,
         "other_count": 0,
         "sent_to_subproc": 0,
-        "filtered_by_cooldown": 0,
+        "dropped_queue_full": 0,
     }
 
     per_symbol_per_day = {}
@@ -201,7 +204,7 @@ def run_backtest():
     log.info(f"R3 觸發:           {grand_total['r3_count']:>10,}")
     log.info(f"其他觸發:          {grand_total['other_count']:>10,}")
     log.info(f"推到 queue 成功:   {grand_total['sent_to_subproc']:>10,}")
-    log.info(f"Queue 滿丟棄:      {grand_total['filtered_by_cooldown']:>10,}")
+    log.info(f"Queue 滿丟棄:      {grand_total['dropped_queue_full']:>10,}")
     log.info("")
     log.info("每日明細:")
     for sym in SYMBOLS:

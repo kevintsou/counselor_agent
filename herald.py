@@ -109,7 +109,7 @@ def send_price_alert(symbol: str, name: str, prev: float, curr: float,
                      ts: str, ticks_moved: int = 0) -> bool:
     """推播成交價變動通知（每 30 秒 PriceMonitor 呼叫，不走 LLM）。
 
-    觸發條件：變動達 ≥ 2 檔（依 TWSE 升降單位）。
+    觸發條件：變動達 ≥ 4 檔（依 TWSE 升降單位）。
 
     Args:
         symbol:      股票代號

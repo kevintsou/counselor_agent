@@ -72,12 +72,12 @@ class Broker:
 
         elif event_code in (self._EV_SESSION_UP, self._EV_RECONNECTED):
             was_recovering = self._session_recovering
+            age = time.time() - self._session_down_ts if self._session_down_ts else 0
             self._session_recovering = False
             self._session_down_ts = 0.0
             self._connected = True
             if was_recovering:
-                age = time.time() - self._session_down_ts if self._session_down_ts else 0
-                log.info(f"✅ Shioaji session 自動恢復完成")
+                log.info(f"✅ Shioaji session 自動恢復完成(停機 {age:.0f}s)")
 
     @property
     def session_recovering(self) -> bool:

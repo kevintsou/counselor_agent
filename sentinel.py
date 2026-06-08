@@ -17,7 +17,6 @@
 import logging
 import logging.handlers
 import os
-import queue
 import signal
 import sys
 import threading
