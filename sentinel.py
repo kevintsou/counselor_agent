@@ -15,8 +15,8 @@
    → strategist(子進程) → LLM → Telegram
 """
 import logging
+import logging.handlers
 import os
-import queue
 import signal
 import sys
 import threading
@@ -24,6 +24,8 @@ import time
 from collections import deque
 from datetime import datetime, time as dtime
 from pathlib import Path
+
+import multiprocessing
 
 import yaml
 from dotenv import load_dotenv
@@ -46,7 +48,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOGS / "sentinel.log"),
+        logging.handlers.RotatingFileHandler(
+            LOGS / "sentinel.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB per file
+            backupCount=5,
+            encoding="utf-8",
+        ),
         logging.StreamHandler(),
     ],
 )
@@ -368,7 +375,6 @@ _LAST_TICK_TS: dict[str, datetime] = {}
 # 每檔最新成交價(由 on_tick 維護,供 PriceMonitor 讀取)
 _LAST_PRICE: dict[str, float] = {}
 # multiprocessing.Queue:strategist 子進程有獨立 GIL,不會與 Shioaji tokio runtime 搶鎖
-import multiprocessing
 _TRIGGER_QUEUE: multiprocessing.Queue = multiprocessing.Queue(maxsize=100)
 _STRATEGIST_PROC: multiprocessing.Process | None = None
 
@@ -550,6 +556,8 @@ class Sentinel:
             for sym in removed:
                 broker.unsubscribe_tick(sym)
                 _LAST_TICK_TS.pop(sym, None)
+                _LAST_PRICE.pop(sym, None)
+                self._price_snap.pop(sym, None)
                 log.info(f"  ➖ 熱重載取消訂閱 {sym}")
             self.stocks = new_stocks
             self._watchlist_mtime = mtime
@@ -688,7 +696,6 @@ class Sentinel:
                 )
 
         # 1. tick 流量檢查
-        any_tick_recent = False
         all_ticks_dead  = True
         known_syms      = [st["symbol"] for st in self.stocks]
         for s in self.stocks:
@@ -697,7 +704,6 @@ class Sentinel:
             if last:
                 idle = (now - last).total_seconds()
                 if idle < 30:
-                    any_tick_recent = True
                     all_ticks_dead  = False
                 if idle > self.NO_TICK_ALERT_SEC and not sj_recovering:
                     # 只在確認「不是 Shioaji 自動恢復」時才告警,避免假訊號

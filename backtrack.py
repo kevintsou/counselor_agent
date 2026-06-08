@@ -3,7 +3,7 @@
 17:00 觸發,流程:
   1. 抓 ticks + 五檔(Shioaji)
   2. 抓三大法人 + 融資券(TWSE)
-  3. 算 26 項指標(indicators.py)
+  3. 算 32 項指標(indicators.py)
   4. 書庫 RAG 查詢(2-3 本相關書)
   5. 餵 LLM 解讀 → 拿分析 + 評分
   6. 推 Telegram 短報
@@ -54,12 +54,15 @@ def rag_query(question: str, top_k: int = 3) -> list[str]:
 
 # ================== LLM ==================
 def ask_llm(prompt: str, system: str = "") -> str:
-    """呼叫 LLM 拿分析(沿用 llm_client.py)。"""
+    """呼叫 LLM 拿分析(透過 llm_client 設定)。"""
     try:
-        from llm_client import get_client
-        client = get_client()
+        from openai import OpenAI
+        import llm_client as _lc
+        if not _lc.MINIMAX_API_KEY:
+            return "⚠️ MINIMAX_API_KEY 未設定"
+        client = OpenAI(api_key=_lc.MINIMAX_API_KEY, base_url=_lc.MINIMAX_BASE_URL)
         resp = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "MiniMax-M3"),
+            model=_lc.MINIMAX_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -67,13 +70,10 @@ def ask_llm(prompt: str, system: str = "") -> str:
             temperature=0.3,
             max_tokens=2000,
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content or ""
     except Exception as e:
         log.error(f"LLM 呼叫失敗: {e}")
         return f"⚠️ LLM 分析失敗:{e}"
-
-
-import os  # 給 ask_llm 用
 
 
 # ================== Prompt 組裝 ==================
@@ -125,8 +125,9 @@ SYSTEM_PROMPT = """你是「台股軍師」,擁有豐富的台股籌碼與主力
 """
 
 
-def build_user_prompt(indicators: dict, rag_chunks: list[str]) -> str:
-    parts = [f"# {SYMBOL}({SYMBOL_NAME}) {date.today().isoformat()} 盤後分析\n"]
+def build_user_prompt(indicators: dict, rag_chunks: list[str], target_date: str = "") -> str:
+    report_date = target_date or date.today().isoformat()
+    parts = [f"# {SYMBOL}({SYMBOL_NAME}) {report_date} 盤後分析\n"]
 
     parts.append("## 組 A:Ticks + 五檔(15 項)")
     parts.append(json.dumps(indicators["group_A_ticks_5snap"], ensure_ascii=False, indent=2))
@@ -136,6 +137,9 @@ def build_user_prompt(indicators: dict, rag_chunks: list[str]) -> str:
 
     parts.append("\n## 組 C:融資券(5 項)")
     parts.append(json.dumps(indicators["group_C_margin_short"], ensure_ascii=False, indent=2))
+
+    parts.append("\n## 組 D:大盤指數(6 項)")
+    parts.append(json.dumps(indicators["group_D_market_index"], ensure_ascii=False, indent=2))
 
     if rag_chunks:
         parts.append("\n## 書庫參考(供你引用論述)")
@@ -251,6 +255,7 @@ def save_md_report(llm_output: str, indicators: dict, today: str) -> Path:
     a = indicators["group_A_ticks_5snap"]
     b = indicators["group_B_institutional"]
     c = indicators["group_C_margin_short"]
+    d = indicators["group_D_market_index"]
 
     content = f"""# {SYMBOL} {SYMBOL_NAME} 盤後分析報告
 **日期:** {today}  
@@ -277,14 +282,14 @@ def save_md_report(llm_output: str, indicators: dict, today: str) -> Path:
 | 五檔價差 | {a['spread']} 元({a['spread_pct']}%) |
 | 五檔量差 | {a['bid5_minus_ask5']:+,} 張(買1 {a['bid_qty1_minus_ask_qty1']:+,}) |
 
-### 組 B:三大法人
-| 項目 | 買 | 賣 | 淨 |
-|---|---|---|---|
-| 外資 | {b.get('foreign_buy', 0):,} | {b.get('foreign_sell', 0):,} | {b.get('foreign_net_shares', 0):+,} |
-| 投信 | {b.get('invest_trust_buy', 0):,} | {b.get('invest_trust_sell', 0):,} | {b.get('invest_trust_net_shares', 0):+,} |
-| 自營商 | {b.get('dealer_buy', 0):,} | {b.get('dealer_sell', 0):,} | {b.get('dealer_net_shares', 0):+,} |
-| **合計** | - | - | **{b.get('total_3instit_net_shares', 0):+,}** |
-| 訊號 | 外資+投信同向:**{b.get('foreign_trust_same_direction', '?')}** | | |
+### 組 B:三大法人（全市場金額）
+| 法人 | 淨額 |
+|---|---|
+| 外資 | {b.get('foreign_net_amount', 0) / 1e8:+.2f} 億 |
+| 投信 | {b.get('invest_trust_net_amount', 0) / 1e8:+.2f} 億 |
+| 自營商 | {b.get('dealer_net_amount', 0) / 1e8:+.2f} 億 |
+| **合計** | **{b.get('total_3instit_net_amount', 0) / 1e8:+.2f} 億** |
+| 外資+投信同向 | {b.get('foreign_trust_same_direction', '?')} |
 
 ### 組 C:融資券
 | 項目 | 數值 |
@@ -295,6 +300,16 @@ def save_md_report(llm_output: str, indicators: dict, today: str) -> Path:
 | 融券增減 | {c.get('short_change', 0):+,} |
 | 券資比 | {c.get('short_margin_ratio_pct', 0):.2f}% |
 | 散戶情緒 | {c.get('retail_sentiment', '?')} |
+
+### 組 D:大盤指數
+| 項目 | 數值 |
+|---|---|
+| 加權收盤 | {d.get('taiex_close', 0)} |
+| 漲跌點 | {d.get('taiex_change', 0):+} |
+| 漲跌幅 | {d.get('taiex_change_pct', 0):+.2f}% |
+| 成交量 | {d.get('taiex_volume', 0):,} 億 |
+| 成交值 | {d.get('taiex_trade_value', 0):,} 億 |
+| 個股與大盤 | {d.get('sync_with_market', '?')} |
 
 ---
 
@@ -339,8 +354,8 @@ def run(symbol: str = SYMBOL, target_date: Optional[str] = None) -> bool:
     log.info(f"  ticks: {len(ticks)} 筆,快照: {'有' if snap else '無'}")
 
     # 2) TWSE
-    from twse_fetcher import fetch_institutional, fetch_margin_short
-    inst = fetch_institutional(symbol, target_date)
+    from twse_fetcher import fetch_institutional_3instit, fetch_margin_short
+    inst = fetch_institutional_3instit(target_date)
     ms = fetch_margin_short(symbol, target_date)
 
     # 2b) 大盤指數(v6.1 改用 FMTQIK)
@@ -351,21 +366,22 @@ def run(symbol: str = SYMBOL, target_date: Optional[str] = None) -> bool:
     # 3) 指標(v6.1 刪除 OI)
     from indicators import calc_all
     indicators = calc_all(ticks, snap, inst, ms, market, symbol)
-    log.info(f"  指標算完:總計 26 項(組 A 15 / B 6 / C 5 / D 6)")
+    log.info(f"  指標算完:總計 32 項(組 A 15 / B 6 / C 5 / D 6)")
 
-    # 4) RAG
-    rag_chunks = rag_query(f"盤後分析 {SYMBOL_NAME} 主力 法人 籌碼", top_k=3)
+    # 4) RAG — 用傳入的 symbol 查詢,避免硬寫 SYMBOL_NAME
+    symbol_name = SYMBOL_NAME if symbol == SYMBOL else symbol
+    rag_chunks = rag_query(f"盤後分析 {symbol_name} 主力 法人 籌碼", top_k=3)
     log.info(f"  RAG 命中 {len(rag_chunks)} 段")
 
     # 5) LLM
-    user_prompt = build_user_prompt(indicators, rag_chunks)
+    user_prompt = build_user_prompt(indicators, rag_chunks, target_date)
     llm_output = ask_llm(user_prompt, SYSTEM_PROMPT)
     log.info(f"  LLM 分析完成({len(llm_output)} 字)")
 
     # 6) Telegram
-    from telegram_safety import send_telegram  # 沿用軍師既有的推播工具
+    from telegram_safety import safe_send
     summary = make_telegram_summary(indicators, llm_output)
-    send_telegram(summary)
+    safe_send(summary)
     log.info(f"  Telegram 短報已送")
 
     # 7) md

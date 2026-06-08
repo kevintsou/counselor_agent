@@ -24,19 +24,24 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 
-def send(msg: str, parse_mode: str = "Markdown") -> bool:
-    """通用 Telegram 推播,回傳是否成功。"""
+def send(msg: str, parse_mode: Optional[str] = "Markdown") -> bool:
+    """通用 Telegram 推播,回傳是否成功。
+
+    parse_mode=None 或空字串 → 不傳給 Telegram(純文字,不解析 Markdown)。
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         log.warning("Telegram 設定缺失(TELEGRAM_BOT_TOKEN/CHAT_ID)")
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = urllib.parse.urlencode({
+        params: dict = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": msg,
-            "parse_mode": parse_mode,
             "disable_web_page_preview": "true",
-        }).encode()
+        }
+        if parse_mode:  # 空字串或 None 都跳過,Telegram 預設純文字
+            params["parse_mode"] = parse_mode
+        data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(url, data=data)
         with urllib.request.urlopen(req, timeout=10) as r:
             result = json.loads(r.read())
@@ -104,7 +109,7 @@ def send_price_alert(symbol: str, name: str, prev: float, curr: float,
                      ts: str, ticks_moved: int = 0) -> bool:
     """推播成交價變動通知（每 30 秒 PriceMonitor 呼叫，不走 LLM）。
 
-    觸發條件：變動達 ≥ 2 檔（依 TWSE 升降單位）。
+    觸發條件：變動達 ≥ 4 檔（依 TWSE 升降單位）。
 
     Args:
         symbol:      股票代號
