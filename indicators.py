@@ -1,6 +1,6 @@
 """
-軍師系統 — 26 項指標計算 (indicators.py)
-從 ticks + 五檔 + 三大法人 + 融資券 算出 26 項指標,分 4 組。
+軍師系統 — 32 項指標計算 (indicators.py)
+從 ticks + 五檔 + 三大法人 + 融資券 + 大盤指數 算出 32 項指標,分 4 組。
 """
 import logging
 import statistics
@@ -199,9 +199,14 @@ def calc_margin_indicators(ms: Optional[dict], prev_ms: Optional[dict] = None) -
     if not ms:
         return {"_error": "no margin data", "_source_failed": True}
 
-    margin_change = ms["margin_change"]
-    short_change = ms["short_change"]
-    ratio = ms["short_margin_ratio"]
+    margin_change = ms.get("margin_change", 0)
+    short_change  = ms.get("short_change", 0)
+    # short_margin_ratio 由 fetch 路徑即時算出,但 DB 讀取路徑(load_margin_short)無此欄
+    # 統一在此回算,避免 KeyError
+    margin_bal = ms.get("margin_balance", 0)
+    short_bal  = ms.get("short_balance", 0)
+    ratio = ms.get("short_margin_ratio",
+                   (short_bal / margin_bal * 100 if margin_bal > 0 else 0))
 
     # 散戶情緒:融資增 = 散戶加碼(偏多延續但後繼乏力)/ 融券增 = 散戶看空
     retail_sentiment = (
