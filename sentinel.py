@@ -15,6 +15,7 @@
    → strategist(子進程) → LLM → Telegram
 """
 import logging
+import logging.handlers
 import os
 import queue
 import signal
@@ -46,7 +47,12 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOGS / "sentinel.log"),
+        logging.handlers.RotatingFileHandler(
+            LOGS / "sentinel.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB per file
+            backupCount=5,
+            encoding="utf-8",
+        ),
         logging.StreamHandler(),
     ],
 )
