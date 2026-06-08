@@ -161,7 +161,9 @@ def fetch_margin_short(symbol: str = "2883", trade_date: Optional[str] = None) -
 
 
 def load_institutional(trade_date: str) -> dict:
-    """讀回當日三大法人(全市場)dict。"""
+    """讀回當日三大法人(全市場)dict。
+    回傳格式與 fetch_institutional_3instit 一致: {party: {"buy": int, "sell": int, "net": int}}
+    """
     if not DB_PATH.exists():
         return {}
     conn = sqlite3.connect(DB_PATH)
@@ -170,7 +172,15 @@ def load_institutional(trade_date: str) -> dict:
         "SELECT * FROM institutional_3instit WHERE trade_date=?",
         (trade_date,),
     )
-    return {r["party"]: dict(r) for r in cur.fetchall()}
+    result = {}
+    for r in cur.fetchall():
+        result[r["party"]] = {
+            "buy": r["buy_amount"],
+            "sell": r["sell_amount"],
+            "net": r["net_amount"],
+        }
+    conn.close()
+    return result
 
 
 def load_margin_short(symbol: str, trade_date: str) -> Optional[dict]:

@@ -54,12 +54,15 @@ def rag_query(question: str, top_k: int = 3) -> list[str]:
 
 # ================== LLM ==================
 def ask_llm(prompt: str, system: str = "") -> str:
-    """呼叫 LLM 拿分析(沿用 llm_client.py)。"""
+    """呼叫 LLM 拿分析(透過 llm_client 設定)。"""
     try:
-        from llm_client import get_client
-        client = get_client()
+        from openai import OpenAI
+        import llm_client as _lc
+        if not _lc.MINIMAX_API_KEY:
+            return "⚠️ MINIMAX_API_KEY 未設定"
+        client = OpenAI(api_key=_lc.MINIMAX_API_KEY, base_url=_lc.MINIMAX_BASE_URL)
         resp = client.chat.completions.create(
-            model=os.getenv("LLM_MODEL", "MiniMax-M3"),
+            model=_lc.MINIMAX_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -67,13 +70,10 @@ def ask_llm(prompt: str, system: str = "") -> str:
             temperature=0.3,
             max_tokens=2000,
         )
-        return resp.choices[0].message.content
+        return resp.choices[0].message.content or ""
     except Exception as e:
         log.error(f"LLM 呼叫失敗: {e}")
         return f"⚠️ LLM 分析失敗:{e}"
-
-
-import os  # 給 ask_llm 用
 
 
 # ================== Prompt 組裝 ==================
@@ -277,14 +277,14 @@ def save_md_report(llm_output: str, indicators: dict, today: str) -> Path:
 | 五檔價差 | {a['spread']} 元({a['spread_pct']}%) |
 | 五檔量差 | {a['bid5_minus_ask5']:+,} 張(買1 {a['bid_qty1_minus_ask_qty1']:+,}) |
 
-### 組 B:三大法人
-| 項目 | 買 | 賣 | 淨 |
-|---|---|---|---|
-| 外資 | {b.get('foreign_buy', 0):,} | {b.get('foreign_sell', 0):,} | {b.get('foreign_net_shares', 0):+,} |
-| 投信 | {b.get('invest_trust_buy', 0):,} | {b.get('invest_trust_sell', 0):,} | {b.get('invest_trust_net_shares', 0):+,} |
-| 自營商 | {b.get('dealer_buy', 0):,} | {b.get('dealer_sell', 0):,} | {b.get('dealer_net_shares', 0):+,} |
-| **合計** | - | - | **{b.get('total_3instit_net_shares', 0):+,}** |
-| 訊號 | 外資+投信同向:**{b.get('foreign_trust_same_direction', '?')}** | | |
+### 組 B:三大法人（全市場金額）
+| 法人 | 淨額 |
+|---|---|
+| 外資 | {b.get('foreign_net_amount', 0) / 1e8:+.2f} 億 |
+| 投信 | {b.get('invest_trust_net_amount', 0) / 1e8:+.2f} 億 |
+| 自營商 | {b.get('dealer_net_amount', 0) / 1e8:+.2f} 億 |
+| **合計** | **{b.get('total_3instit_net_amount', 0) / 1e8:+.2f} 億** |
+| 外資+投信同向 | {b.get('foreign_trust_same_direction', '?')} |
 
 ### 組 C:融資券
 | 項目 | 數值 |
@@ -339,8 +339,8 @@ def run(symbol: str = SYMBOL, target_date: Optional[str] = None) -> bool:
     log.info(f"  ticks: {len(ticks)} 筆,快照: {'有' if snap else '無'}")
 
     # 2) TWSE
-    from twse_fetcher import fetch_institutional, fetch_margin_short
-    inst = fetch_institutional(symbol, target_date)
+    from twse_fetcher import fetch_institutional_3instit, fetch_margin_short
+    inst = fetch_institutional_3instit(target_date)
     ms = fetch_margin_short(symbol, target_date)
 
     # 2b) 大盤指數(v6.1 改用 FMTQIK)
@@ -363,9 +363,9 @@ def run(symbol: str = SYMBOL, target_date: Optional[str] = None) -> bool:
     log.info(f"  LLM 分析完成({len(llm_output)} 字)")
 
     # 6) Telegram
-    from telegram_safety import send_telegram  # 沿用軍師既有的推播工具
+    from telegram_safety import safe_send
     summary = make_telegram_summary(indicators, llm_output)
-    send_telegram(summary)
+    safe_send(summary)
     log.info(f"  Telegram 短報已送")
 
     # 7) md

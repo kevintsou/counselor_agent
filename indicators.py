@@ -332,20 +332,16 @@ if __name__ == "__main__":
     from twse_fetcher import load_margin_short, load_institutional
     from market_index_fetcher import load_market
     from datetime import date
+    import json
     import logging
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     import sys
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     target = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
     print(f"=== 測試 {target} ===")
     ticks = load_ticks_from_db("2883", target)
     snap = load_snapshot_from_db("2883", target)
-    inst = load_institutional("2883", target)
+    inst = load_institutional(target)           # 全市場法人,只需日期
     ms = load_margin_short("2883", target)
-    tse = load_market_index("TAIEX", target)
-    tpex = load_market_index("TPEX", target)
-    oi = load_txf_oi(target)
-    market = {"TAIEX": tse, "TPEX": tpex} if tse else None
-    print(f"ticks={len(ticks)} snap={bool(snap)} inst={bool(inst)} ms={bool(ms)} "
-          f"market={bool(market)} oi={bool(oi)}")
-    import json
-    print(json.dumps(calc_all(ticks, snap, inst, ms, market, oi), ensure_ascii=False, indent=2))
+    market = load_market(target)
+    print(f"ticks={len(ticks)} snap={bool(snap)} inst={bool(inst)} ms={bool(ms)} market={bool(market)}")
+    print(json.dumps(calc_all(ticks, snap, inst, ms, market, "2883"), ensure_ascii=False, indent=2))
