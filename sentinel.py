@@ -505,6 +505,9 @@ class Sentinel:
         # PriceMonitor 狀態
         self._price_snap: dict[str, float] = {}   # 上次快照的成交價 {symbol: price}
         self._last_price_check: float = 0.0        # 上次快照的 epoch time
+        # Heartbeat:每 60s 寫一行 log,讓 keep_alive.sh 知道 sentinel 還活著
+        # (平常 tick 不觸發訊號不會寫 log,watchdog 會誤判卡死)
+        self._last_heartbeat: float = 0.0
 
         # ✅ Kevin 2026-06-08 拍板:不從 watchlist 的 cost 拿初始快照
         # 理由:cost 是進場成本價,不是前日收盤,用來當 baseline 語意不對
@@ -800,6 +803,12 @@ class Sentinel:
                 if now_epoch - self._last_price_check >= self.PRICE_MONITOR_SEC:
                     self._do_price_monitor()
                     self._last_price_check = now_epoch
+                # heartbeat (每 60s):讓 keep_alive.sh log mtime 保持更新,避免誤判卡死
+                if now_epoch - self._last_heartbeat >= 60:
+                    syms = [s["symbol"] for s in self.stocks]
+                    alive = [s for s in syms if s in _LAST_TICK_TS]
+                    log.info(f"♥ sentinel alive — 監控 {len(syms)} 檔,有 tick {len(alive)} 檔")
+                    self._last_heartbeat = now_epoch
                 time.sleep(1)
         finally:
             broker.disconnect()
