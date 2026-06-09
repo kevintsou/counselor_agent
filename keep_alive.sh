@@ -28,8 +28,8 @@ is_quiet_time() {
     if [ "$WEEKDAY" -ge 6 ]; then
         return 0
     fi
-    # 收盤後 13:40(820 分)到當日 23:59(1439 分)
-    if [ "$MIN" -ge 820 ]; then
+    # 收盤後 13:35(815 分)到當日 23:59(1439 分) — 與 sentinel SHUTDOWN_GRACE 對齊
+    if [ "$MIN" -ge 815 ]; then
         return 0
     fi
     # 隔天 00:00 到 08:50(530 分)— 凌晨也視為昨晚收盤延伸

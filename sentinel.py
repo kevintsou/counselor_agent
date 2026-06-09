@@ -699,6 +699,8 @@ class Sentinel:
                 )
 
         # 1. tick 流量檢查
+        # 收盤後 tick 自然停止,不告警也不重連(避免收盤後假警報)
+        market_is_open = now.time() <= MARKET_CLOSE
         all_ticks_dead  = True
         known_syms      = [st["symbol"] for st in self.stocks]
         for s in self.stocks:
@@ -708,17 +710,17 @@ class Sentinel:
                 idle = (now - last).total_seconds()
                 if idle < 30:
                     all_ticks_dead  = False
-                if idle > self.NO_TICK_ALERT_SEC and not sj_recovering:
-                    # 只在確認「不是 Shioaji 自動恢復」時才告警,避免假訊號
+                if market_is_open and idle > self.NO_TICK_ALERT_SEC and not sj_recovering:
+                    # 只在盤中且確認「不是 Shioaji 自動恢復」時才告警,避免假訊號
                     self._alert(
                         f"no_tick_{sym}",
                         f"{sym} 已 {int(idle)}s 沒收到 tick,請手動查證",
                         cooldown_sec=300,
                     )
 
-        # 2. 手動重連判斷(只有 Shioaji 自動恢復失敗/從未連過 才到這裡)
+        # 2. 手動重連判斷(只在盤中;收盤後 tick 自然停止,不重連)
         seen_before = any(s in _LAST_TICK_TS for s in known_syms)
-        if all_ticks_dead and seen_before:
+        if market_is_open and all_ticks_dead and seen_before:
             log.warning("⚠️ 判斷 broker 斷線(Shioaji 自動恢復逾時),啟動手動重連")
             self._consecutive_reconnect_fails += 1
             resubs = [(s["symbol"], on_tick, "tick") for s in self.stocks]
