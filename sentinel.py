@@ -773,6 +773,11 @@ class Sentinel:
             while self._running:
                 now = datetime.now().time()
                 if now < MARKET_OPEN:
+                    # 盤前暖機:每 30s 醒一次,順便寫 heartbeat 讓 watchdog 知道還活著
+                    now_epoch = time.time()
+                    if now_epoch - self._last_heartbeat >= 60:
+                        log.info(f"♥ sentinel alive (盤前暖機 {now.strftime('%H:%M:%S')})")
+                        self._last_heartbeat = now_epoch
                     time.sleep(30)
                     continue
                 if now > SHUTDOWN_GRACE:
