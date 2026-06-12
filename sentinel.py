@@ -488,7 +488,8 @@ _COOLDOWN_GATE = CooldownGate(seconds=300)
 class Sentinel:
     # Watchdog 設定
     HEALTH_CHECK_SEC    = 10    # 每 10s 跑一次 health check
-    NO_TICK_ALERT_SEC   = 60    # 60s 沒 tick 就告警
+    NO_TICK_RESUB_SEC   = 120   # 120s 沒 tick → 靜默重訂閱(不告警)
+    NO_TICK_ALERT_SEC   = 300   # 300s 沒 tick 且重訂閱無效 → 才告警
     MAX_RECONNECT_FAILS = 3     # 連續重連失敗 N 次發 alert
     # PriceMonitor 設定
     PRICE_MONITOR_SEC   = 30    # 每 30s 對比一次成交價
@@ -710,13 +711,24 @@ class Sentinel:
                 idle = (now - last).total_seconds()
                 if idle < 30:
                     all_ticks_dead  = False
-                if market_is_open and idle > self.NO_TICK_ALERT_SEC and not sj_recovering:
-                    # 只在盤中且確認「不是 Shioaji 自動恢復」時才告警,避免假訊號
-                    self._alert(
-                        f"no_tick_{sym}",
-                        f"{sym} 已 {int(idle)}s 沒收到 tick,請手動查證",
-                        cooldown_sec=300,
-                    )
+                if market_is_open and not sj_recovering:
+                    if idle > self.NO_TICK_ALERT_SEC:
+                        # 300s 仍無 tick → 告警(讓 Kevin 人工查)
+                        self._alert(
+                            f"no_tick_{sym}",
+                            f"{sym} 已 {int(idle)}s 沒收到 tick,請手動查證",
+                            cooldown_sec=600,
+                        )
+                    elif idle > self.NO_TICK_RESUB_SEC:
+                        # 120s 無 tick 但其他股正常 → 靜默重訂閱該股
+                        resub_key = f"resub_{sym}"
+                        last_resub = self._last_alert_ts.get(resub_key)
+                        if not last_resub or (now - last_resub).total_seconds() > 120:
+                            log.warning(f"⚠️ {sym} 已 {int(idle)}s 沒 tick,嘗試靜默重訂閱")
+                            broker.unsubscribe_tick(sym)
+                            time.sleep(0.3)
+                            broker.subscribe_tick(sym, on_tick)
+                            self._last_alert_ts[resub_key] = now
 
         # 2. 手動重連判斷(只在盤中;收盤後 tick 自然停止,不重連)
         seen_before = any(s in _LAST_TICK_TS for s in known_syms)
