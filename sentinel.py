@@ -784,9 +784,18 @@ class Sentinel:
         try:
             while self._running:
                 now = datetime.now().time()
+                now_epoch = time.time()
+
+                # 週末(週六=5 / 週日=6)→ 全天休市,只寫 heartbeat 不做任何檢查
+                if datetime.now().weekday() >= 5:
+                    if now_epoch - self._last_heartbeat >= 60:
+                        log.info(f"♥ sentinel alive (週末休市 {datetime.now().strftime('%m/%d %H:%M')})")
+                        self._last_heartbeat = now_epoch
+                    time.sleep(60)
+                    continue
+
                 if now < MARKET_OPEN:
                     # 盤前暖機:每 30s 醒一次,順便寫 heartbeat 讓 watchdog 知道還活著
-                    now_epoch = time.time()
                     if now_epoch - self._last_heartbeat >= 60:
                         log.info(f"♥ sentinel alive (盤前暖機 {now.strftime('%H:%M:%S')})")
                         self._last_heartbeat = now_epoch
@@ -813,7 +822,6 @@ class Sentinel:
                         break
                     continue
                 # 開盤中:每 1s 醒一次
-                now_epoch = time.time()
                 # health check (每 10s)
                 if self._last_health_check is None or \
                    (datetime.now() - self._last_health_check).total_seconds() >= self.HEALTH_CHECK_SEC:
