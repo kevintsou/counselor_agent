@@ -1,73 +1,53 @@
 """
-軍師系統 — LLM 客戶端 (llm_client.py)
-封裝 MiniMax API + RAG 書庫檢索,所有 LLM 呼叫統一走這支。
+軍師系統 — LLM 客戶端 (llm/router_client.py)
+==============================================
+所有 LLM 呼叫統一走 Claude Code Router(CCR),本機代理進程,對外路由到 Claude。
+CCR 提供 Anthropic Messages API 相容介面,這裡只需指向本機端點,不再管理
+供應商專屬的 API key / base_url / model 名稱 — 那些是 CCR 的設定範疇。
 
 用法:
-    from llm_client import ask_strategist
-    order = ask_strategist(
-        symbol="2883",
-        signal="red",
-        snapshot={"price": 23.45, "volume_ratio": 1.8, ...}
-    )
+    from llm.router_client import ask_strategist, ask_backtrack
+    order = ask_strategist(symbol="2883", signal="red", snapshot={...})
 """
-import os
 import logging
-from pathlib import Path
-from typing import Optional
-from dotenv import load_dotenv
+import re
 
-_ROOT = Path(__file__).parent
-load_dotenv(_ROOT / ".env")
+from config import CCR_API_KEY, CCR_BASE_URL, CCR_MODEL, config
+from llm.rag import rag_query
 
 log = logging.getLogger("counselor.llm")
 
-# ===== MiniMax 設定 =====
-MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
-MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
-MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.io/v1")
-EBOOK_DB_PATH = os.getenv("EBOOK_DB_PATH", str(_ROOT.parent.parent / "ebook-library" / "db"))
+
+def _client():
+    from anthropic import Anthropic
+    return Anthropic(api_key=CCR_API_KEY, base_url=CCR_BASE_URL)
 
 
-# ===== RAG 查詢 =====
-def rag_query(question: str, n_results: int = 3) -> list[dict]:
-    """從 ebook-library ChromaDB 撈相關書節。
-
-    回傳: [{"source": "書名/章節", "text": "...", "score": 0.85}, ...]
-    """
-    if not Path(EBOOK_DB_PATH).exists():
-        log.warning(f"找不到 RAG 書庫: {EBOOK_DB_PATH}")
-        return []
+def _call(system: str, user: str, max_tokens: int, temperature: float) -> str:
+    """打一次 Claude Code Router,回傳純文字回覆(已過濾 <think> 區塊)。"""
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=EBOOK_DB_PATH)
-        # 自動挑資料量最大的 collection
-        colls = client.list_collections()
-        best = max(colls, key=lambda c: c.count()) if colls else None
-        if not best:
-            return []
-        results = best.query(query_texts=[question], n_results=n_results)
-        out = []
-        for i, doc in enumerate(results["documents"][0]):
-            meta = results["metadatas"][0][i] if results.get("metadatas") else {}
-            out.append({
-                "source": meta.get("source", "未知書節"),
-                "text": doc[:500],
-                "score": 1 - results["distances"][0][i] if results.get("distances") else 0,
-            })
-        return out
+        client = _client()
+        resp = client.messages.create(
+            model=CCR_MODEL,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        raw = "".join(
+            block.text for block in resp.content if getattr(block, "type", "") == "text"
+        ).strip()
+        cleaned = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
+        if not cleaned.strip() and raw:
+            cleaned = raw.split("</think>")[-1].strip()
+        return cleaned.strip() or "❌ 軍師無回應"
     except Exception as e:
-        log.error(f"RAG 查詢失敗: {e}")
-        return []
-
-
-# ===== 軍師總司令 prompt 模板 =====
+        log.error(f"Claude Code Router 呼叫失敗(base_url={CCR_BASE_URL}): {e}")
+        return f"❌ 軍師 API 失敗: {e}"
 
 
 def _format_trigger_detail(detail: dict) -> str:
-    """把 sentinel 回傳的 detail dict 格式化成人讀的 markdown。
-
-    目的:讓 LLM 看到具體數字(筆數/張數/價區/逐筆),而不是空泛的「R1 觸發」。
-    """
+    """把 sentinel 回傳的 detail dict 格式化成人讀的 markdown,讓 LLM 看到具體數字。"""
     if not detail:
         return "(無明細)"
     lines = []
@@ -112,7 +92,7 @@ def _format_trigger_detail(detail: dict) -> str:
     return "\n".join(lines)
 
 
-SYSTEM_PROMPT = """你是台股盤中 AI 軍師,協助 Kevin 判斷是否進場。
+SYSTEM_PROMPT_STRATEGIST = """你是台股盤中 AI 軍師,協助 Kevin 判斷是否進場。
 
 【四流派分工】
 - 🟢 趨勢動能(主軸):Stage 2 + VCP 突破
@@ -140,31 +120,26 @@ SYSTEM_PROMPT = """你是台股盤中 AI 軍師,協助 Kevin 判斷是否進場�
 
 
 def ask_strategist(symbol: str, signal: str, snapshot: dict) -> str:
-    """呼叫軍師總司令,回傳 60-120 字密令。"""
-    if not MINIMAX_API_KEY:
-        return "❌ MINIMAX_API_KEY 未設定"
+    """呼叫軍師總司令,回傳 80-180 字密令。"""
+    llm_cfg = config.llm_config()
 
-    # 成本防火牆(每日 50 次, 每月 1000 次)
     try:
-        from cost_counter import record_call
+        from llm.cost_counter import record_call
         cost = record_call(symbol, signal)
         if cost["daily_remaining"] <= 0:
-            return "🛑 當日 LLM 額度用盡(50/50),請 Kevin 評估"
+            return f"🛑 當日 LLM 額度用盡({llm_cfg.get('daily_call_limit', 50)}/{llm_cfg.get('daily_call_limit', 50)}),請 Kevin 評估"
         if cost["alert"]:
             log.warning(cost["alert"])
     except Exception as e:
         log.warning(f"成本計數器跳過: {e}")
 
-    # 1. 撈 RAG 書節(同主題 top-3)
     rag_q = f"{symbol} {'主力表態' if signal == 'red' else '冰山牆瓦解' if signal == 'black' else '籌碼'} 進場 風險管理"
     rag_hits = rag_query(rag_q, n_results=3)
     rag_text = "\n".join(f"《{h['source']}》: {h['text'][:200]}" for h in rag_hits) or "(無相關書節)"
 
-    # 2. 拆出 trigger_detail(避免全部 dump 進 prompt 撐爆 token)
     trigger_detail = snapshot.pop("trigger_detail", {})
     detail_text = _format_trigger_detail(trigger_detail) if trigger_detail else "(無觸發明細)"
 
-    # 3. 組 prompt(snapshot 排除掉 trigger_detail 避免重複)
     snap_text = "\n".join(f"  {k}: {v}" for k, v in snapshot.items() if k != "trigger_detail")
     user_msg = f"""標的: {symbol}
 訊號等級: {signal.upper()}
@@ -183,49 +158,36 @@ def ask_strategist(symbol: str, signal: str, snapshot: dict) -> str:
 
 請下密令(依據請引用上述數字):"""
 
-    # 3. 呼叫 MiniMax
+    return _call(
+        SYSTEM_PROMPT_STRATEGIST, user_msg,
+        max_tokens=llm_cfg.get("max_tokens_realtime", 300),
+        temperature=llm_cfg.get("temperature", 0.3),
+    )
+
+
+def ask_backtrack(prompt: str, system: str) -> str:
+    """盤後深度分析呼叫(analysis/backtrack.py 用,system prompt 由呼叫端提供)。"""
+    llm_cfg = config.llm_config()
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=MINIMAX_API_KEY, base_url=MINIMAX_BASE_URL)
-        resp = client.chat.completions.create(
-            model=MINIMAX_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            max_tokens=500,
-            temperature=0.3,
-            extra_body={"thinking": {"type": "disabled"}},
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        # 過濾 <<think>>...</<think>> 思考鍵(有時跳過 disable 還是會輸出)
-        import re
-        cleaned = re.sub(r"<think>.*?</think>\s*", "", raw, flags=re.DOTALL)
-        # 如果清理後為空, 抓 raw 最末段
-        if not cleaned.strip() and raw:
-            cleaned = raw.split("</think>")[-1].strip()
-        return cleaned.strip() or "❌ 軍師無回應(可能被思考鏈吃掉 token)"
+        from llm.cost_counter import record_call
+        cost = record_call("backtrack", "daily_report")
+        if cost["alert"]:
+            log.warning(cost["alert"])
     except Exception as e:
-        log.error(f"MiniMax 呼叫失敗: {e}")
-        return f"❌ 軍師 API 失敗: {e}"
+        log.warning(f"成本計數器跳過: {e}")
+
+    return _call(
+        system, prompt,
+        max_tokens=llm_cfg.get("max_tokens_backtrack", 2000),
+        temperature=llm_cfg.get("temperature", 0.3),
+    )
 
 
 if __name__ == "__main__":
-    # CLI 測試
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        print(ask_strategist(
-            "2883", "red",
-            {"price": 23.45, "volume_ratio": 1.8, "tick_density": "high", "twap_burst": True}
-        ))
-    else:
-        print("=== 軍師 LLM 客戶端 ===")
-        print(f"  Model: {MINIMAX_MODEL}")
-        print(f"  Base URL: {MINIMAX_BASE_URL}")
-        print(f"  RAG DB: {EBOOK_DB_PATH}")
-        print(f"  RAG exists: {Path(EBOOK_DB_PATH).exists()}")
-        # 測試 RAG
-        hits = rag_query("凱基金 主力 籌碼")
-        print(f"\n  RAG 測試: {len(hits)} 命中")
-        for h in hits:
-            print(f"    - {h['source']} (score={h['score']:.2f})")
+    print("=== 軍師 LLM 客戶端(Claude Code Router)===")
+    print(f"  CCR base_url: {CCR_BASE_URL}")
+    print(f"  CCR model: {CCR_MODEL}")
+    hits = rag_query("凱基金 主力 籌碼")
+    print(f"\n  RAG 測試: {len(hits)} 命中")
+    for h in hits:
+        print(f"    - {h['source']} (score={h['score']:.2f})")

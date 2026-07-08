@@ -1,181 +1,164 @@
 # 台股軍師 — 系統架構說明
 
-> 整合 Kevin 原計畫書 + v2 修正（B 投研副駕模式 / 純模擬 / 🟢🟡 主軸）
-> 2026-06-03 修訂
+> v2.0 模組化重構(2026-07-08)
+> 核心變更:JSON 設定驅動、LLM 改走 Claude Code Router、新增 MCP server
 
 ---
 
 ## 🎯 系統定位
 
 **AI 軍師 ≠ 自動下單機器人**
-- 我是 Kevin 的**盤中副駕**，只做三件事：偵查 → 分析 → 提醒
-- Kevin 自己看密令、自己按滑鼠下單
-- 前 3 個月純紙上交易，3 個月後看準確率再決定要不要自動化
+- 盤中副駕,只做三件事:偵查 → 分析 → 提醒
+- 使用者自己看密令、自己按滑鼠下單
+- 所有股票代號、策略門檻、系統參數都在 JSON 設定檔,不寫死在程式碼裡
 
 ---
 
-## 🏛️ 四大流派分工
-
-| 層級 | 流派 | 角色 | 何時介入 |
-|---|---|---|---|
-| **主軸** | 🟢 趨勢動能 | 進場時機 | Stage 2 + VCP 突破訊號 |
-| **主軸** | 🟡 籌碼面 | 主力意圖 | TWAP / 攔截單 / 法人連買 |
-| **輔助** | 🔵 價值 | 基本面驗證 | 持股財報週、Q3/Q4 換月 |
-| **輔助** | 🔴 量化 | 風險管理 | 部位大小、回撤控制 |
-
-> 🟢🟡 打架的時候 → 以籌碼為主（台股主力決定一切）
-> 🔵🟢 打架的時候 → 拉長看趨勢（短線噪音不算）
-
----
-
-## 🧩 系統組件
+## 🧩 套件結構
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                  📡 訂閱層 (Watchlist)                   │
-│  Kevin 自行管理的持股清單：2883, 2330, + 未來新增         │
-│  存：watchlist.yaml（每檔：代號 / 進場成本 / 部位大小）  │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────┐
-│              🔍 偵查兵 (Sentinel) — Python              │
-│  - Shioaji API 訂閱 Tick + BidAsk + 撮合                 │
-│  - 即時計算：每分鐘成交量 / 單筆張數分佈 / 委託簿變化    │
-│  - 觸發條件：組合特徵（見下表）                          │
-│  - 輸出：盤面快照 JSON（去識別化，無個資）               │
-└─────────────────────┬───────────────────────────────────┘
-                      │ 觸發時才呼叫
-                      ▼
-┌─────────────────────────────────────────────────────────┐
-│       🧠 總司令 (Strategist) — LLM (MiniMax)            │
-│  - 接收：盤面快照 + 過去 7 日相似情境 + 流派知識          │
-│  - 角色注入：Minervini 風格 + 台股主力語境                 │
-│  - 輸出：60-120 字「軍師密令」（含動作 / 邏輯 / 風險）    │
-│  - 強制結構：                                              │
-│      【動作】買/賣/觀望                                     │
-│      【依據】主力意圖 + 技術訊號                            │
-│      【風險】單筆 ≤ X%                                     │
-│      【失效】跌破/突破某價位 → 觸發反向動作                 │
-└─────────────────────┬───────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────┐
-│         📣 通訊兵 (Herald) — Telegram Bot               │
-│  - Kevin 收到密令 → 自己判斷是否下單                      │
-│  - 每日 13:30 收盤後：自動寄出「軍師日報」                  │
-│  - 每週日 20:00：自動寄出「軍師週報 + 準確率」             │
-└─────────────────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────┐
-│        📊 戰情室 (War Room) — 準確率儀表板              │
-│  - 每筆訊號：進場建議 + 1hr/1day/1week 後股價              │
-│  - 累積 20 筆 → 出第一份「軍師準確率報告」                  │
-│  - 準確率 < 40% → 自動降級觸發條件                         │
-└─────────────────────────────────────────────────────────┘
+counselor_agent/
+├── config.py                # 統一設定層:讀 .env(密鑰)+ config/*.json(股票與門檻)
+├── config/
+│   ├── watchlist.json        # 監控股票清單 + 盤中時段
+│   └── thresholds.json       # R1-R4 策略門檻 / PriceMonitor / 健康檢查 / LLM 額度
+│
+├── broker/                   # 券商連線(Shioaji 封裝,唯一知道 API 細節的地方)
+│   └── shioaji_broker.py
+│
+├── core/                     # 核心:即時 tick 偵測管線(極簡化,只做這件事)
+│   ├── strategies.py          # StrategyDetector(R1-R4)+ CooldownGate,純邏輯可單元測試
+│   ├── price_monitor.py       # tick_size() + PriceMonitor
+│   └── sentinel.py            # 進程協調:訂閱/派工/watchdog,狀態全收斂在 Sentinel 實例
+│
+├── llm/                      # LLM 客戶端(經 Claude Code Router)
+│   ├── router_client.py       # ask_strategist() / ask_backtrack(),不再直連任何供應商
+│   ├── rag.py                 # ChromaDB 書庫檢索
+│   └── cost_counter.py        # 每日/每月呼叫次數計數
+│
+├── notify/                   # 通知(Telegram)
+│   └── herald.py               # send_order/send_alert/send_price_alert + 表格安全網(合併原 telegram_safety.py)
+│
+├── data/                     # 資料抓取 + 純計算
+│   ├── ticks.py                # Shioaji 逐筆成交 + 五檔快照 → SQLite
+│   ├── twse.py                 # TWSE 三大法人 + 融資融券 → SQLite
+│   ├── market.py               # TWSE 加權指數 → SQLite
+│   └── indicators.py           # 純計算:組 A/B/C/D 指標(無 IO)
+│
+├── analysis/
+│   └── backtrack.py            # 盤後分析主流程,預設對 watchlist 全部標的各跑一輪
+│
+├── mcp_server/                # MCP server:讓 LLM client 查詢/控制本系統
+│   ├── tools.py                 # 純函式工具實作(查詢/控制/原始資料)
+│   └── server.py                # FastMCP 註冊層,stdio transport
+│
+├── sentinel.py                # 進入點:設定 logging → core.sentinel.Sentinel().run()
+├── strategist.py               # 子進程進入點:LLM + Telegram(獨立 GIL)
+├── backtest.py                 # 歷史回測,直接用 core.strategies,與 sentinel 解耦
+│
+├── run_sentinel.sh / run_backtrack.sh / run_mcp_server.sh
+├── .mcp.json                   # 讓 Claude Code 自動啟動 MCP server
+└── requirements.txt
 ```
+
+**分層原則**:`core/` 只碰即時 tick 偵測與進程協調,不知道 LLM 或 Telegram 存在(用 lazy import 呼叫 `notify/`,避免子進程沒必要載入)。`data/` 與 `analysis/` 完全不碰 Shioaji 訂閱邏輯。`mcp_server/` 是獨立進程,不進入 sentinel 的即時迴圈,維持與 Shioaji GIL 隔離的原則。
 
 ---
 
-## 🎯 觸發特徵（取代「單一張數」）
+## 🔧 設定驅動(不寫死)
 
-| 等級 | 名稱 | 條件 | 嚴重度 |
-|---|---|---|---|
-| 🟡 | TWAP 抽水機 | 同方向 1-99 張連續 ≥ 5 筆 + 間隔 ≤ 30 秒 | 低（試探） |
-| 🟠 | 攔截牆 | 499 張掛賣一/買一持續 ≥ 60 秒 | 中（表態） |
-| 🔴 | **主力表態** | 🟡 + 🟠 同時觸發 + 出現 9:00-9:30 | **高（叫 LLM）** |
-| ⚫ | 冰山牆瓦解 | 23.45 賣牆從 6000 張 → 1000 張（30 秒內） | 極高（叫 LLM + 紅色 alert） |
+| 檔案 | 內容 |
+|---|---|
+| `.env` | 密鑰:Shioaji / Telegram / Claude Code Router / RAG 路徑 |
+| `config/watchlist.json` | 監控股票清單(可任意增減檔數)、盤中時段 |
+| `config/thresholds.json` | R1-R4 策略門檻、試撮時段、訊號冷卻秒數、PriceMonitor、健康檢查、LLM 額度、指標大單門檻、log rotation |
 
-> **只有 🔴 和 ⚫ 才升級為「紅色警戒」→ 才呼叫 LLM**
-> 其他都只在背景 log，不消耗 API
+`config.py` 提供熱重載(mtime 偵測):人工編輯 JSON 或透過 MCP 工具寫入,sentinel 主迴圈下次 health check(預設 10 秒)就會套用新值,**不需重啟**。
+
+---
+
+## 🔌 Claude Code Router(LLM 層)
+
+原本 `llm_client.py` / `backtrack.py` 各自直連 MiniMax API(重複邏輯、供應商細節散落兩處)。
+v2 統一改走本機執行的 **Claude Code Router(CCR)**:
+
+```
+sentinel/backtrack → llm/router_client.py → CCR(本機 127.0.0.1:3456)→ Claude
+```
+
+- `llm/router_client.py` 只認得 Anthropic Messages API 相容協定,不知道實際供應商是誰
+- 換模型 / 換供應商 / 加 fallback,全部在 CCR 的設定檔處理,不用改本專案任何一行程式碼
+- 啟動前提:CCR 需先在本機跑起來(`ccr start`),`.env` 指向它的位址
+
+---
+
+## 🛰️ MCP Server(讓 LLM 查詢/控制本系統)
+
+`mcp_server/` 是獨立進程,透過 stdio 暴露以下工具:
+
+**查詢**:`get_watchlist` / `get_config` / `get_snapshot` / `get_indicators` /
+`get_recent_alerts` / `get_sentinel_status` / `get_backtrack_report`
+
+**控制**:`add_watchlist_symbol` / `remove_watchlist_symbol` / `trigger_backtrack` /
+`update_strategy_threshold` / `update_price_monitor_config` /
+`update_health_check_config` / `update_llm_config` / `update_config_path`
+
+**原始資料**:`query_ticks` / `query_institutional` / `query_margin_short` / `query_market_index`
+
+所有控制工具最終都寫回 `config/*.json`,sentinel 熱重載後立即生效。`.mcp.json` 已註冊好啟動指令,Claude Code 會自動連上。
+
+---
+
+## 🏛️ 四大流派分工(不變)
+
+| 層級 | 流派 | 角色 |
+|---|---|---|
+| 主軸 | 🟢 趨勢動能 | Stage 2 + VCP 突破訊號 |
+| 主軸 | 🟡 籌碼面 | TWAP / 攔截單 / 法人連買 |
+| 輔助 | 🔵 價值 | 基本面驗證 |
+| 輔助 | 🔴 量化 | 風險管理 |
+
+---
+
+## 🎯 觸發策略(門檻見 `config/thresholds.json`)
+
+| 規則 | 條件形狀 |
+|---|---|
+| R1 | 短窗口內 ≥N 筆 ≥M 張買單 |
+| R2 | 較長窗口,門檻更高 |
+| R3 | 窗口內淨買市值超過門檻,同 symbol 有冷卻 |
+| R4 | 大單買賣計分,累積超過門檻觸發 |
+
+---
+
+## 📡 PriceMonitor baseline 機制
+
+每 `price_monitor.interval_sec` 秒比對成交價,變動達 `price_monitor.alert_ticks` 檔(TWSE 升降單位)才推 Telegram(不走 LLM)。
+基準價只在觸發 alert 時更新,平時沿用「上次 alert 的價」,避免被雜訊洗掉。
 
 ---
 
 ## 🛡️ 成本防火牆
 
-| 機制 | 數值 | 目的 |
-|---|---|---|
-| Cooldown（同訊號） | 5 分鐘 | 避免 499 連砸 10 次狂叫 |
-| Daily API limit | 50 次/日 | 控 MiniMax 月費 |
-| Monthly budget alarm | 1000 次/月 → 通知 Kevin | 預警 |
-| 觸發嚴重度 | 三段可調：保守/積極/狂熱 | Kevin 隨時切換 |
+`config/thresholds.json` 的 `llm` 區塊控制:`daily_call_limit`(每日上限)、`monthly_call_alert`(每月警戒)、`max_tokens_realtime` / `max_tokens_backtrack`。`llm/cost_counter.py` 統一計數,即時盤中訊號與盤後分析都會計入同一組額度。
 
 ---
 
-## 📡 PriceMonitor baseline 機制 (2026-06-08 拍板)
+## 🚦 執行方式
 
-PriceMonitor 每 30 秒比對各檔成交價，用升降單位（tick size）為門檻，變動達 ≥ 4 檔才推 Telegram（不走 LLM）。
+```bash
+# 盤中監控
+./run_sentinel.sh
 
-**baseline 更新規則：**
-- 初始快照留空，等第一筆 tick 來時設為基準（**不推播**）
-- |diff| ≥ 4 × tick_size → 觸發 alert + **把現價寫成新基準**
-- |diff| < 4 × tick_size → 安靜，快照沿用「上次 alert 的價」（不被 30 秒雜訊洗掉）
-- **不從 watchlist.yaml 的 `cost` 載入初始基準**（cost 是進場成本價，不是前日收盤，語意不對）
+# 盤後分析(對 watchlist 全部標的各跑一輪)
+./run_backtrack.sh
 
-**台股升降單位（tick size）：**
+# MCP server(供 LLM client 查詢/控制)
+./run_mcp_server.sh
 
-| 股價區間 | 每檔跳動 | 4 檔門檻（範例） |
-|---|---|---|
-| < 10 | 0.01 | 0.04 |
-| 10 – 50 | 0.05 | 0.20 |
-| 50 – 100 | 0.10 | 0.40 |
-| 100 – 500 | 0.50 | 2.00 |
-| 500 – 1000 | 1.00 | 4.00 |
-| ≥ 1000 | 5.00 | 20.00 |
+# 回測
+python backtest.py
 
----
-
-## 📚 知識後盾（RAG）
-
-- 現有 4,793 chunks 已在線（10 本書）
-- **軍師總司令呼叫時**，會同時檢索：
-  1. Minervini / O'Neil 類（進場邏輯）
-  2. 交易心態 / 刻意練習（避免情緒化決策）
-  3. 該股歷史新聞（MEMORY.md 已有 2883/2330 結構）
-- 命中弱訊號書的修正配方（H2 切塊 + 領域錨點詞）已記在 MEMORY.md，可套用到未來新書
-
----
-
-## 🚦 開發階段（先動哪一塊？）
-
-### Phase 0 — 本週（基礎建設）
-- [ ] `watchlist.yaml` 結構 + 編輯器
-- [ ] Shioaji 連線測試（不訂閱，只驗證登入）
-- [ ] `.env` 模板（Shioaji key / MiniMax key / Telegram bot token）
-- [ ] 成本計數器（每日呼叫次數寫入 `state/calls_YYYY-MM-DD.json`）
-
-### Phase 1 — 第 1-2 週（偵查兵 MVP）
-- [ ] Shioaji Tick 訂閱（單檔先測 2883）
-- [ ] 組合特徵偵測（🟡🟠🔴⚫）
-- [ ] 只 log，不叫 LLM（純驗證偵查兵）
-
-### Phase 2 — 第 3 週（總司令接入）
-- [ ] LLM prompt 模板（含四流派角色）
-- [ ] RAG 檢索（top-3 書節）
-- [ ] 60-120 字輸出 + 強制結構
-
-### Phase 3 — 第 4 週（通訊 + 戰情室）
-- [ ] Telegram bot 推送
-- [ ] 盤中日報 + 週報
-- [ ] 準確率回測（1hr/1day/1week 收盤對照）
-
-### Phase 4 — 第 2 個月起（多檔擴充 + 調優）
-- [ ] watchlist 加入第 2 檔、第 3 檔
-- [ ] 準確率儀表板
-- [ ] 觸發嚴重度三段可調 UI
-- [ ] 累積 50 筆訊號 → 評估是否進入真倉測試
-
----
-
-## 🧪 Phase 0 開工前的最後 5 個問題
-
-1. **Telegram Bot 已開了嗎？** 還是要用 LINE（你 SOUL.md 提到有 LINE 貼圖經驗）
-2. **現有 heartbeat.sh / wakeup.sh 是不是已經在 launchd 跑排程？** 新系統要併進去還是獨立
-3. **2883 之後 Kevin 想加哪幾檔？** 給個清單我才好設計 watchlist schema
-4. **凱基（kgi）API 跟 Shioaji 哪個先用？** 看你現有 equity_distribution_*.sh 是抓凱基的
-5. **真要從 2883 開始跑，還是先做個虛擬測試股（避開主動告知）？** 我建議先 2883 模擬，順便熟悉凱基的主力習性
-
----
-
-**Phase 0 開工只需回答 1 + 2 + 3，其他等我動到那再問。** 🧭
+# 單元測試(不連線任何外部服務)
+python tests/test_strategies.py
+```

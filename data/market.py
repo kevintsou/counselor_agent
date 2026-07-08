@@ -1,10 +1,6 @@
 """
-軍師系統 — 大盤指數抓取 (market_index_fetcher.py)
-改用 TWSE openapi FMTQIK(免費、免登入、穩定)
-
-端點:
-  - FMTQIK:每日市場成交資訊(含加權指數 開/收/漲跌)
-  - STOCK_DAY_ALL:個股日成交(可順便驗證 2883 收盤)
+軍師系統 — 大盤指數抓取 (data/market.py)
+TWSE openapi FMTQIK(免費、免登入、穩定)
 """
 import logging
 import sqlite3
@@ -14,10 +10,10 @@ from pathlib import Path
 from typing import Optional
 import requests
 
-_ROOT = Path(__file__).parent
-DB_PATH = _ROOT / "state" / "market.db"
+from config import STATE_DIR
 
-log = logging.getLogger("counselor.market")
+DB_PATH = STATE_DIR / "market.db"
+log = logging.getLogger("counselor.data.market")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 TIMEOUT = 20
@@ -25,7 +21,6 @@ BASE = "https://openapi.twse.com.tw/v1"
 
 
 def _ensure_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS market_index (
@@ -50,13 +45,9 @@ def _to_float(s) -> float:
 
 
 def fetch_market_index(trade_date: Optional[str] = None) -> Optional[dict]:
-    """
-    抓當日加權指數收盤 + 漲跌 + 總成交量。
-    FMTQIK 回傳近 3 日(今 + 前 2 交易日)。
-    """
+    """抓當日加權指數收盤 + 漲跌 + 總成交量。FMTQIK 回傳近 3 日。"""
     if trade_date is None:
         trade_date = date.today().isoformat()
-    # 轉民國日期給過濾
     y, m, d = trade_date.split("-")
     roc_date = f"{int(y) - 1911}{m}{d}"
     for attempt in range(1, 4):
@@ -106,9 +97,7 @@ def load_market(trade_date: str) -> Optional[dict]:
         return None
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    cur = conn.execute(
-        "SELECT * FROM market_index WHERE trade_date=?", (trade_date,)
-    )
+    cur = conn.execute("SELECT * FROM market_index WHERE trade_date=?", (trade_date,))
     row = cur.fetchone()
     conn.close()
     return dict(row) if row else None

@@ -1,41 +1,37 @@
 """
-軍師系統 — Ticks 抓取模組 (ticks_fetcher.py)
-盤後從 Shioaji 抓當天全日 ticks + 收盤五檔。
+軍師系統 — Ticks 抓取模組 (data/ticks.py)
+盤後從 Shioaji 抓當天全日 ticks + 收盤五檔,落 sqlite。
 
 設計原則:
 - 盤後獨立運作,不依賴 sentinel
 - 內建 timeout / 重試
-- 資料落 sqlite 便於重讀
 - 失敗不 panic,回傳 None 讓上層判斷
+- 標的一律由呼叫端傳入,不寫死代號
 """
 import logging
 import sqlite3
 import time
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 from typing import Optional
-from dotenv import load_dotenv
 
-_ROOT = Path(__file__).parent
-load_dotenv(_ROOT / ".env")
+from config import STATE_DIR
 
-log = logging.getLogger("counselor.ticks_fetcher")
+log = logging.getLogger("counselor.data.ticks")
 
-DB_PATH = _ROOT / "state" / "ticks.db"
+DB_PATH = STATE_DIR / "ticks.db"
 
 
 def _ensure_db():
-    """確保 DB 與資料表存在。"""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ticks (
             symbol TEXT NOT NULL,
             trade_date TEXT NOT NULL,
-            ts INTEGER NOT NULL,           -- epoch ms
-            close REAL NOT NULL,           -- 成交價
-            volume INTEGER NOT NULL,       -- 張
-            tick_type INTEGER NOT NULL,    -- 1=買, 2=賣, 0=?
+            ts INTEGER NOT NULL,
+            close REAL NOT NULL,
+            volume INTEGER NOT NULL,
+            tick_type INTEGER NOT NULL,
             PRIMARY KEY (symbol, trade_date, ts)
         )
     """)
@@ -56,20 +52,18 @@ def _ensure_db():
     return conn
 
 
-def fetch_ticks(symbol: str = "2883", trade_date: Optional[str] = None) -> Optional[dict]:
-    """
-    抓當天全日 ticks + 收盤五檔,落 sqlite。
+def fetch_ticks(symbol: str, trade_date: Optional[str] = None) -> Optional[dict]:
+    """抓當天全日 ticks + 收盤五檔,落 sqlite。
+
     Args:
-        symbol: 股票代號(預設 2883 凱基金)
+        symbol: 股票代號(必填,不設預設值)
         trade_date: YYYY-MM-DD,None = 今日
     Returns:
-        dict with keys: tick_count, snapshot, db_path
-        或 None(失敗)
+        dict with keys: tick_count, snapshot, db_path,或 None(失敗)
     """
     if trade_date is None:
         trade_date = date.today().isoformat()
 
-    import shioaji as sj
     from broker import broker
 
     if not broker.connect(retries=2):
@@ -82,11 +76,9 @@ def fetch_ticks(symbol: str = "2883", trade_date: Optional[str] = None) -> Optio
             log.error(f"❌ 找不到合約 {symbol}")
             return None
 
-        # 1) 抓當日 ticks
         log.info(f"📥 抓 {symbol} {trade_date} ticks ...")
         t0 = time.time()
         raw = broker._api.ticks(contract, date=trade_date)
-        # raw.dict() 回傳 {'ts':[...], 'close':[...], 'volume':[...], 'tick_type':[...]}
         rd = raw.dict()
         n = len(rd.get("ts", []))
         log.info(f"   抓到 {n} 筆 ticks(耗時 {time.time()-t0:.1f}s)")
@@ -95,23 +87,15 @@ def fetch_ticks(symbol: str = "2883", trade_date: Optional[str] = None) -> Optio
             log.warning(f"⚠️ {symbol} {trade_date} 沒有 ticks(可能非交易日)")
             return None
 
-        # 2) 落 sqlite
         conn = _ensure_db()
         rows = list(zip(
-            [symbol] * n,
-            [trade_date] * n,
-            rd["ts"],
-            rd["close"],
-            rd["volume"],
-            rd["tick_type"],
+            [symbol] * n, [trade_date] * n,
+            rd["ts"], rd["close"], rd["volume"], rd["tick_type"],
         ))
-        conn.executemany(
-            "INSERT OR REPLACE INTO ticks VALUES (?, ?, ?, ?, ?, ?)", rows
-        )
+        conn.executemany("INSERT OR REPLACE INTO ticks VALUES (?, ?, ?, ?, ?, ?)", rows)
         conn.commit()
         log.info(f"   寫入 {n} 筆 ticks 到 {DB_PATH.name}")
 
-        # 3) 抓收盤五檔快照
         log.info(f"📸 抓 {symbol} 收盤快照 ...")
         snap = broker._api.snapshots([contract])
         if not snap:
@@ -119,16 +103,10 @@ def fetch_ticks(symbol: str = "2883", trade_date: Optional[str] = None) -> Optio
             return {"tick_count": n, "snapshot": None, "db_path": str(DB_PATH)}
 
         s = snap[0]
-        # 解析五檔(屬性名 bid_price / bid_qty / ask_price / ask_qty)
-        bid_total_5 = 0
-        ask_total_5 = 0
+        bid_total_5 = ask_total_5 = 0
         for i in range(1, 6):
-            bp = getattr(s, f"bid_price_{i}", None) or 0
-            bq = getattr(s, f"bid_qty_{i}", None) or 0
-            ap = getattr(s, f"ask_price_{i}", None) or 0
-            aq = getattr(s, f"ask_qty_{i}", None) or 0
-            bid_total_5 += int(bq)
-            ask_total_5 += int(aq)
+            bid_total_5 += int(getattr(s, f"bid_qty_{i}", None) or 0)
+            ask_total_5 += int(getattr(s, f"ask_qty_{i}", None) or 0)
 
         snap_data = {
             "symbol": symbol,
@@ -170,7 +148,7 @@ def fetch_ticks(symbol: str = "2883", trade_date: Optional[str] = None) -> Optio
 
 
 def load_ticks_from_db(symbol: str, trade_date: str) -> list[dict]:
-    """從 sqlite 讀回 ticks(給 indicators.py 用)。"""
+    """從 sqlite 讀回 ticks(給 data/indicators.py 用)。"""
     if not DB_PATH.exists():
         return []
     conn = sqlite3.connect(DB_PATH)
@@ -185,7 +163,6 @@ def load_ticks_from_db(symbol: str, trade_date: str) -> list[dict]:
 
 
 def load_snapshot_from_db(symbol: str, trade_date: str) -> Optional[dict]:
-    """從 sqlite 讀回快照。"""
     if not DB_PATH.exists():
         return None
     conn = sqlite3.connect(DB_PATH)
@@ -201,11 +178,16 @@ def load_snapshot_from_db(symbol: str, trade_date: str) -> Optional[dict]:
 
 if __name__ == "__main__":
     import sys
+    from config import config
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    # 預設抓今天
-    target_date = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
-    result = fetch_ticks("2883", target_date)
+    target_date = sys.argv[2] if len(sys.argv) > 2 else date.today().isoformat()
+    target_symbol = sys.argv[1] if len(sys.argv) > 1 else (config.symbols[0] if config.symbols else None)
+    if not target_symbol:
+        print("用法: python -m data.ticks <symbol> [date]")
+        sys.exit(1)
+    result = fetch_ticks(target_symbol, target_date)
     if result:
-        print(f"\n✅ 完成:ticks={result['tick_count']} 快照=有" if result.get("snapshot") else f"\n⚠️ 抓到 ticks 但無快照")
+        print(f"\n✅ 完成:ticks={result['tick_count']} 快照={'有' if result.get('snapshot') else '無'}")
     else:
         print("\n❌ 抓取失敗")

@@ -62,7 +62,7 @@ if [ "$IDLE" -gt "$MAX_IDLE" ]; then
         /Users/kjkin2006/.openclaw/workspace/projects/counselor_agent/.venv/bin/python -c "
 import sys
 sys.path.insert(0, '/Users/kjkin2006/.openclaw/workspace/projects/counselor_agent')
-from herald import send_alert
+from notify.herald import send_alert
 send_alert('red', '⚠️ sentinel 開盤中卡死 ${IDLE}s,強制重啟 PID=${PID}')
 " 2>/dev/null
         touch "$WARN_FILE"

@@ -1,0 +1,20 @@
+# 軍師系統依賴
+# 安裝: pip install -r requirements.txt
+
+# 券商 API
+shioaji>=1.5.0
+
+# LLM(經 Claude Code Router 呼叫,Anthropic Messages API 相容協定)
+anthropic>=0.40.0
+
+# MCP server(讓 LLM client 可查詢/控制本系統)
+mcp>=1.2.0
+
+# RAG 書庫
+chromadb>=0.5.0
+
+# TWSE 公開資料
+requests>=2.31.0
+
+# .env 設定
+python-dotenv>=1.0.0

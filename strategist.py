@@ -1,6 +1,6 @@
 """
 軍師系統 — 軍師子進程 (strategist.py)
-專責:LLM 呼叫 + Telegram 推播
+專責:LLM 呼叫(經 Claude Code Router)+ Telegram 推播
 
 子進程透過 multiprocessing.Queue 接收 sentinel 推來的觸發任務,
 在獨立 GIL 中執行 LLM 分析與 Telegram 推播,不與 Shioaji 搶鎖。
@@ -20,22 +20,12 @@ import logging
 import os
 import signal
 import sys
-import time
 import traceback
-from datetime import datetime
 from multiprocessing import Queue
 
-# 確保可以 import 同目錄的 llm_client / herald
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _ROOT)
+from config import LOGS_DIR
 
-# 環境變數 + log
-from dotenv import load_dotenv
-load_dotenv(os.path.join(_ROOT, ".env"))
-
-LOG_DIR = os.path.join(_ROOT, "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_PATH = os.path.join(LOG_DIR, "strategist.log")
+LOG_PATH = LOGS_DIR / "strategist.log"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,7 +41,6 @@ log = logging.getLogger("counselor.strategist")
 
 
 def graceful_exit(signum, frame):
-    """SIGTERM 優雅退出。"""
     log.info(f"🛑 strategist 收到 signal {signum},退出")
     sys.exit(0)
 
@@ -68,10 +57,9 @@ def run_forever(task_queue: Queue):
     from version import __version__
     log.info("🧠 strategist 子進程啟動 v%s (PID=%d)", __version__, os.getpid())
 
-    # 延遲 import(避免跟 sentinel 同時 load Shioaji)
     try:
-        from llm_client import ask_strategist
-        from herald import send_order, send_alert
+        from llm.router_client import ask_strategist
+        from notify.herald import send_order, send_alert
     except Exception as e:
         log.error(f"❌ import 失敗: {e}")
         return
@@ -80,10 +68,8 @@ def run_forever(task_queue: Queue):
         try:
             task = task_queue.get(timeout=10)
         except Exception:
-            # queue.Empty 或其他,繼續等
             continue
         if task is None:
-            # 毒藥丸:父進程通知退出
             log.info("🛑 收到毒藥丸,退出")
             break
 
@@ -91,7 +77,6 @@ def run_forever(task_queue: Queue):
         sig = task.get("sig", "?")
         try:
             log.info(f"📥 收到 {symbol} {sig} 任務")
-            # 模擬 broker snapshot(子進程沒 Shioaji,只從父進程拿必要欄位)
             snapshot = {
                 "qty": task.get("qty", 0),
                 "side": task.get("side", ""),
@@ -106,21 +91,22 @@ def run_forever(task_queue: Queue):
         except Exception as e:
             log.error(f"❌ 處理 {symbol} {sig} 失敗: {e}")
             log.error(traceback.format_exc())
-            # 推一則 alert,讓 Kevin 知道有任務失敗
             try:
-                from herald import send_alert
+                from notify.herald import send_alert
                 send_alert("red", f"軍師任務失敗 {symbol} {sig}: {str(e)[:200]}")
             except Exception:
                 pass
 
 
 if __name__ == "__main__":
-    # 獨立測試用:從 stdin 讀 task
+    # 獨立測試用:從 stdin 讀 task JSON
     import json
+    import time
+
     log.info("獨立測試模式:從 stdin 讀 task JSON")
     try:
-        from llm_client import ask_strategist
-        from herald import send_order
+        from llm.router_client import ask_strategist
+        from notify.herald import send_order
         while True:
             line = sys.stdin.readline().strip()
             if not line:

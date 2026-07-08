@@ -1,0 +1,24 @@
+{
+  "stocks": [
+    {
+      "symbol": "2883",
+      "name": "凱基金",
+      "cost": 0,
+      "shares": 0,
+      "sector": "金控",
+      "notes": "籌碼主軸，壽險+證券為主力"
+    },
+    {
+      "symbol": "2330",
+      "name": "台積電",
+      "cost": 0,
+      "shares": 0,
+      "sector": "半導體",
+      "notes": "趨勢主軸，外資+法人連買追蹤"
+    }
+  ],
+  "mode": "paper",
+  "market_open": "09:00",
+  "market_close": "13:30",
+  "shutdown_grace": "13:35"
+}

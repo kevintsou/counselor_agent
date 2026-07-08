@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "counselor-agent": {
+      "command": "bash",
+      "args": ["run_mcp_server.sh"]
+    }
+  }
+}

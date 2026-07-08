@@ -1,0 +1,57 @@
+{
+  "strategy": {
+    "R1": {
+      "window_sec": 5,
+      "min_qty": 50,
+      "min_count": 5
+    },
+    "R2": {
+      "window_sec": 30,
+      "min_qty": 100,
+      "min_count": 10
+    },
+    "R3": {
+      "window_sec": 60,
+      "amount_divisor": 100000,
+      "cooldown_sec": 60
+    },
+    "R4": {
+      "window_sec": 60,
+      "min_qty": 50,
+      "trigger_count": 20
+    }
+  },
+  "auction": {
+    "start": "09:00:00",
+    "end": "09:00:30"
+  },
+  "signal_cooldown_sec": 300,
+  "price_monitor": {
+    "interval_sec": 30,
+    "alert_ticks": 4
+  },
+  "health_check": {
+    "interval_sec": 10,
+    "no_tick_alert_sec": 300,
+    "no_tick_resub_sec": 120,
+    "max_reconnect_fails": 3,
+    "session_recovery_grace_sec": 180,
+    "alert_cooldown_sec": 300,
+    "reconnect_ok_cooldown_sec": 3600
+  },
+  "llm": {
+    "daily_call_limit": 50,
+    "monthly_call_alert": 1000,
+    "max_tokens_realtime": 300,
+    "max_tokens_backtrack": 2000,
+    "temperature": 0.3
+  },
+  "indicators": {
+    "large_order_threshold_lots": 50,
+    "late_session_hour": 13
+  },
+  "logging": {
+    "max_bytes": 10485760,
+    "backup_count": 5
+  }
+}

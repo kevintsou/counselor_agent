@@ -1,11 +1,10 @@
 """
-軍師系統 — TWSE 公開資料抓取 (twse_fetcher.py)
-全部改用 openapi.twse.com.tw(免費、免登入、CORS 友善)
+軍師系統 — TWSE 公開資料抓取 (data/twse.py)
+全部走 openapi.twse.com.tw(免費、免登入、CORS 友善)
 
 端點:
-  - 個股三大法人:❌ 個股免費無 → 改用 BFI82U 全市場
-  - 個股融資融券:MI_MARGN(個股 + 增減都有了,MI_MARGN 內含昨日餘額)
-  - 個股開高低收:STOCK_DAY_ALL(順便備用)
+  - 三大法人(全市場):BFI82U
+  - 個股融資融券:MI_MARGN(內含昨日餘額,可算增減)
 """
 import logging
 import sqlite3
@@ -15,10 +14,10 @@ from pathlib import Path
 from typing import Optional
 import requests
 
-_ROOT = Path(__file__).parent
-DB_PATH = _ROOT / "state" / "twse.db"
+from config import STATE_DIR
 
-log = logging.getLogger("counselor.twse")
+DB_PATH = STATE_DIR / "twse.db"
+log = logging.getLogger("counselor.data.twse")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 TIMEOUT = 20
@@ -26,12 +25,11 @@ BASE = "https://openapi.twse.com.tw/v1"
 
 
 def _ensure_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS institutional_3instit (
             trade_date TEXT NOT NULL,
-            party TEXT NOT NULL,                -- 自營商/投信/外資及陸資
+            party TEXT NOT NULL,
             buy_amount INTEGER DEFAULT 0,
             sell_amount INTEGER DEFAULT 0,
             net_amount INTEGER DEFAULT 0,
@@ -58,14 +56,9 @@ def _to_int(s) -> int:
 
 
 def fetch_institutional_3instit(trade_date: Optional[str] = None) -> Optional[dict]:
-    """
-    抓三大法人當日買賣金額(全市場總額,不是個股)。
-    端點:BFI82U(每日 18:00 後出 當日三大法人買賣金額)
-    回傳 dict: {外資及陸資, 投信, 自營商, 合計}
-    """
+    """抓三大法人當日買賣金額(全市場總額,不是個股)。端點:BFI82U。"""
     if trade_date is None:
         trade_date = date.today().isoformat()
-    # openapi BFI82U 無日期參數(就是「今天」的當下)
     for attempt in range(1, 4):
         try:
             log.info(f"📥 抓 BFI82U 三大法人(全市場) {trade_date}")
@@ -92,8 +85,6 @@ def fetch_institutional_3instit(trade_date: Optional[str] = None) -> Optional[di
             conn.commit()
             conn.close()
             log.info(f"   抓到 {len(result)} 個法人")
-            for p, d in result.items():
-                log.info(f"   {p}: 買 {d['buy']:,} 賣 {d['sell']:,} 淨 {d['net']:+,}")
             return result
         except Exception as e:
             log.warning(f"  抓取失敗(第 {attempt} 次): {e}")
@@ -102,11 +93,8 @@ def fetch_institutional_3instit(trade_date: Optional[str] = None) -> Optional[di
     return None
 
 
-def fetch_margin_short(symbol: str = "2883", trade_date: Optional[str] = None) -> Optional[dict]:
-    """
-    抓個股融資融券(全市場一次打包,過濾單檔)。
-    端點:exchangeReport/MI_MARGN
-    """
+def fetch_margin_short(symbol: str, trade_date: Optional[str] = None) -> Optional[dict]:
+    """抓個股融資融券(全市場一次打包,過濾單檔)。端點:MI_MARGN。"""
     if trade_date is None:
         trade_date = date.today().isoformat()
     for attempt in range(1, 4):
@@ -161,24 +149,15 @@ def fetch_margin_short(symbol: str = "2883", trade_date: Optional[str] = None) -
 
 
 def load_institutional(trade_date: str) -> dict:
-    """讀回當日三大法人(全市場)dict。
-    回傳格式與 fetch_institutional_3instit 一致: {party: {"buy": int, "sell": int, "net": int}}
-    """
+    """讀回當日三大法人(全市場)dict:{party: {"buy": int, "sell": int, "net": int}}"""
     if not DB_PATH.exists():
         return {}
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    cur = conn.execute(
-        "SELECT * FROM institutional_3instit WHERE trade_date=?",
-        (trade_date,),
-    )
+    cur = conn.execute("SELECT * FROM institutional_3instit WHERE trade_date=?", (trade_date,))
     result = {}
     for r in cur.fetchall():
-        result[r["party"]] = {
-            "buy": r["buy_amount"],
-            "sell": r["sell_amount"],
-            "net": r["net_amount"],
-        }
+        result[r["party"]] = {"buy": r["buy_amount"], "sell": r["sell_amount"], "net": r["net_amount"]}
     conn.close()
     return result
 
@@ -199,9 +178,12 @@ def load_margin_short(symbol: str, trade_date: str) -> Optional[dict]:
 
 if __name__ == "__main__":
     import sys
+    from config import config
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     target = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
     print("=== 三大法人(全市場) ===")
     print(fetch_institutional_3instit(target))
-    print("\n=== 融資券(2883) ===")
-    print(fetch_margin_short("2883", target))
+    if config.symbols:
+        print(f"\n=== 融資券({config.symbols[0]}) ===")
+        print(fetch_margin_short(config.symbols[0], target))

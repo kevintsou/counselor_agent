@@ -1,25 +1,19 @@
 """
-成本計數器（cost_counter.py）
-追蹤每日/每月 LLM 呼叫次數，超過閾值自動通知 Kevin。
+成本計數器（llm/cost_counter.py）
+追蹤每日/每月 LLM 呼叫次數，超過閾值自動通知 Kevin。額度數字由 config/thresholds.json 的 llm 區塊控制。
 """
 import json
-import sys
 from datetime import date, datetime
-from pathlib import Path
 from typing import Optional
 
-STATE_DIR = Path(__file__).parent / "state"
-STATE_DIR.mkdir(exist_ok=True)
-
-DAILY_LIMIT = 50
-MONTHLY_ALERT = 1000
+from config import STATE_DIR, config
 
 
-def _today_path() -> Path:
+def _today_path():
     return STATE_DIR / f"calls_{date.today().isoformat()}.json"
 
 
-def _month_path() -> Path:
+def _month_path():
     return STATE_DIR / f"calls_{date.today().strftime('%Y-%m')}.json"
 
 
@@ -51,26 +45,30 @@ def record_call(symbol: str = "", trigger: str = "") -> dict:
     month["calls"] += 1
     _month_path().write_text(json.dumps(month, ensure_ascii=False, indent=2))
 
+    llm_cfg = config.llm_config()
+    daily_limit = llm_cfg.get("daily_call_limit", 50)
+    monthly_alert = llm_cfg.get("monthly_call_alert", 1000)
+
     return {
         "daily_used": today["calls"],
-        "daily_remaining": max(0, DAILY_LIMIT - today["calls"]),
+        "daily_remaining": max(0, daily_limit - today["calls"]),
         "monthly_total": month["calls"],
-        "alert": _check_alert(today["calls"], month["calls"]),
+        "alert": _check_alert(today["calls"], month["calls"], daily_limit, monthly_alert),
     }
 
 
-def _check_alert(daily: int, monthly: int) -> Optional[str]:
-    if daily >= DAILY_LIMIT:
+def _check_alert(daily: int, monthly: int, daily_limit: int, monthly_alert: int) -> Optional[str]:
+    if daily >= daily_limit:
         return "🔴 當日 LLM 額度用盡，請 Kevin 評估是否放寬"
-    if monthly >= MONTHLY_ALERT:
-        return "🟠 當月 LLM 呼叫已破 1000 次，建議檢視觸發嚴重度"
-    if daily >= DAILY_LIMIT * 0.8:
-        return f"🟡 當日已用 {daily}/{DAILY_LIMIT}（80%）"
+    if monthly >= monthly_alert:
+        return "🟠 當月 LLM 呼叫已破上限，建議檢視觸發嚴重度"
+    if daily >= daily_limit * 0.8:
+        return f"🟡 當日已用 {daily}/{daily_limit}（80%）"
     return None
 
 
 if __name__ == "__main__":
-    # CLI 測試：python cost_counter.py [simulate_call]
+    import sys
     if len(sys.argv) > 1 and sys.argv[1] == "simulate_call":
         print(json.dumps(record_call("2883", "TEST"), ensure_ascii=False, indent=2))
     else:

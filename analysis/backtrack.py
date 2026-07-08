@@ -1,79 +1,52 @@
 """
-軍師系統 — 盤後分析主程式 (backtrack.py)
+軍師系統 — 盤後分析主程式 (analysis/backtrack.py)
 17:00 觸發,流程:
   1. 抓 ticks + 五檔(Shioaji)
   2. 抓三大法人 + 融資券(TWSE)
-  3. 算 32 項指標(indicators.py)
-  4. 書庫 RAG 查詢(2-3 本相關書)
-  5. 餵 LLM 解讀 → 拿分析 + 評分
+  3. 算指標(data/indicators.py)
+  4. 書庫 RAG 查詢
+  5. 餵 LLM 解讀(經 Claude Code Router)→ 拿分析
   6. 推 Telegram 短報
   7. 存 md 報告
 
 設計:
 - 獨立 cron 觸發,不依賴 sentinel
 - 任何 fetch 失敗不中斷,標記 ⚠️ 繼續跑
-- 報告分層:短報(telegram 8-12 行) / 長報(md 200-500 行)
+- 標的一律讀 config/watchlist.json,不寫死代號;預設對所有監控股跑一輪
 """
 import json
 import logging
 import subprocess
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-_ROOT = Path(__file__).parent
-_REPORTS_DIR = _ROOT / "reports"
-_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+from config import REPORTS_DIR, ROOT, config
+from llm.rag import rag_query as _rag_query_raw
+from llm.router_client import ask_backtrack
+from notify.herald import safe_send
 
 log = logging.getLogger("counselor.backtrack")
-
-SYMBOL = "2883"
-SYMBOL_NAME = "凱基金"
 
 
 # ================== 書庫 RAG ==================
 def rag_query(question: str, top_k: int = 3) -> list[str]:
-    """查 ebook-library,回傳 top_k 段書庫內容(用現成的 query.py)。"""
+    """查 ebook-library,回傳 top_k 段書庫內容(用現成的 query.py 子程序)。"""
+    ebook_dir = ROOT.parent.parent / "ebook-library"
     try:
         result = subprocess.run(
             ["python3", "query.py", question],
-            cwd=str(_ROOT.parent.parent / "ebook-library"),
+            cwd=str(ebook_dir),
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
             log.warning(f"RAG query 失敗: {result.stderr[:200]}")
             return []
-        # 簡單切段(用 --- 切)
         chunks = [c.strip() for c in result.stdout.split("---") if c.strip()]
         return chunks[:top_k]
     except Exception as e:
         log.warning(f"RAG 查詢例外: {e}")
         return []
-
-
-# ================== LLM ==================
-def ask_llm(prompt: str, system: str = "") -> str:
-    """呼叫 LLM 拿分析(透過 llm_client 設定)。"""
-    try:
-        from openai import OpenAI
-        import llm_client as _lc
-        if not _lc.MINIMAX_API_KEY:
-            return "⚠️ MINIMAX_API_KEY 未設定"
-        client = OpenAI(api_key=_lc.MINIMAX_API_KEY, base_url=_lc.MINIMAX_BASE_URL)
-        resp = client.chat.completions.create(
-            model=_lc.MINIMAX_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=2000,
-        )
-        return resp.choices[0].message.content or ""
-    except Exception as e:
-        log.error(f"LLM 呼叫失敗: {e}")
-        return f"⚠️ LLM 分析失敗:{e}"
 
 
 # ================== Prompt 組裝 ==================
@@ -95,7 +68,7 @@ SYSTEM_PROMPT = """你是「台股軍師」,擁有豐富的台股籌碼與主力
 
 ## 主力行為(組 A:ticks+五檔)
 - 大單:+50 張買/賣各 X 筆,淨額 X 張
-- 尾盤訊號:13:00 後大單方向「買/賣/中性」
+- 尾盤訊號:大單方向「買/賣/中性」
 - 內外盤比:X
 - 收盤五檔:買賣價差 X 元(0.X%),五檔量差 X 張(買方 X / 賣方 X)
 - 量能尖峰:HH:MM 桶 5 分鐘量 X 張
@@ -125,20 +98,20 @@ SYSTEM_PROMPT = """你是「台股軍師」,擁有豐富的台股籌碼與主力
 """
 
 
-def build_user_prompt(indicators: dict, rag_chunks: list[str], target_date: str = "") -> str:
+def build_user_prompt(symbol: str, symbol_name: str, indicators: dict, rag_chunks: list[str], target_date: str = "") -> str:
     report_date = target_date or date.today().isoformat()
-    parts = [f"# {SYMBOL}({SYMBOL_NAME}) {report_date} 盤後分析\n"]
+    parts = [f"# {symbol}({symbol_name}) {report_date} 盤後分析\n"]
 
-    parts.append("## 組 A:Ticks + 五檔(15 項)")
+    parts.append("## 組 A:Ticks + 五檔")
     parts.append(json.dumps(indicators["group_A_ticks_5snap"], ensure_ascii=False, indent=2))
 
-    parts.append("\n## 組 B:三大法人(6 項)")
+    parts.append("\n## 組 B:三大法人")
     parts.append(json.dumps(indicators["group_B_institutional"], ensure_ascii=False, indent=2))
 
-    parts.append("\n## 組 C:融資券(5 項)")
+    parts.append("\n## 組 C:融資券")
     parts.append(json.dumps(indicators["group_C_margin_short"], ensure_ascii=False, indent=2))
 
-    parts.append("\n## 組 D:大盤指數(6 項)")
+    parts.append("\n## 組 D:大盤指數")
     parts.append(json.dumps(indicators["group_D_market_index"], ensure_ascii=False, indent=2))
 
     if rag_chunks:
@@ -151,7 +124,7 @@ def build_user_prompt(indicators: dict, rag_chunks: list[str], target_date: str 
 
 
 # ================== Telegram 短報 ==================
-def make_telegram_summary(indicators: dict, llm_output: str) -> str:
+def make_telegram_summary(symbol: str, symbol_name: str, indicators: dict, llm_output: str) -> str:
     """把 LLM 長分析壓成 8-12 行 Telegram 訊息。"""
     a = indicators["group_A_ticks_5snap"]
     b = indicators["group_B_institutional"]
@@ -163,40 +136,30 @@ def make_telegram_summary(indicators: dict, llm_output: str) -> str:
     has_ms = not c.get("_source_failed")
     has_market = not d.get("_source_failed")
 
-    lines = [
-        f"📊 {SYMBOL} {SYMBOL_NAME} {today} 盤後",
-        "",
-    ]
+    lines = [f"📊 {symbol} {symbol_name} {today} 盤後", ""]
 
-    # 結論(抓 LLM 輸出第一行)
     conclusion = ""
     for line in llm_output.split("\n"):
         line = line.strip()
         if line and not line.startswith("#") and "## 結論" not in line:
             conclusion = line
             break
-    if not conclusion:
-        conclusion = "數據已收,詳見長報告"
-    lines.append(f"🎯 {conclusion[:80]}")
+    lines.append(f"🎯 {conclusion[:80] if conclusion else '數據已收,詳見長報告'}")
     lines.append("")
 
-    # 主力一行
     lines.append(
         f"主力:+{a['big_buy_count']}大買 / {a['big_sell_count']}大賣 "
         f"淨 {a['big_buy_net_vol']:+,}張,尾盤{a['late_session_signal']}"
     )
-    # 法人一行(v6.1:全市場金額)
     if has_inst:
         f = b['foreign_net_amount'] / 1e8
         t = b['invest_trust_net_amount'] / 1e8
         d_net = b['dealer_net_amount'] / 1e8
         tot = b['total_3instit_net_amount'] / 1e8
-        lines.append(
-            f"法人(全市場):外 {f:+.2f}億 投 {t:+.2f}億 自 {d_net:+.2f}億 合計 {tot:+.2f}億"
-        )
+        lines.append(f"法人(全市場):外 {f:+.2f}億 投 {t:+.2f}億 自 {d_net:+.2f}億 合計 {tot:+.2f}億")
     else:
         lines.append("法人:⚠️ TWSE 抓取失敗")
-    # 籌碼一行
+
     if has_ms:
         lines.append(
             f"籌碼:融資 {c['margin_change']:+,} 融券 {c['short_change']:+,} "
@@ -204,28 +167,22 @@ def make_telegram_summary(indicators: dict, llm_output: str) -> str:
         )
     else:
         lines.append("籌碼:⚠️ TWSE 抓取失敗")
-    # 大盤一行(v6 新增)
+
     if has_market:
         rs = indicators.get("relative_strength_pct", 0)
         rs_label = f"RS {rs:+.2f}%" if rs else ""
         sync = d.get("sync_with_market", "")
         lines.append(
-            f"大盤:加權 {d['taiex_close']} {d['taiex_change']:+} ({d['taiex_change_pct']:+.2f}%) "
-            f"{sync} {rs_label}"
+            f"大盤:加權 {d['taiex_close']} {d['taiex_change']:+} ({d['taiex_change_pct']:+.2f}%) {sync} {rs_label}"
         )
-    # TXF OI 已於 v6.1 刪除(無穩定免費源)
-    # 價量
+
     lines.append(
         f"價量:開 {a['open']} 收 {a['close']} 高 {a['high']} 低 {a['low']} "
         f"振 {a['amplitude_pct']}%,量 {a['total_volume']:,}張"
     )
-    # 五檔
-    lines.append(
-        f"五檔:差 {a['spread_pct']}%,量差 {a['bid5_minus_ask5']:+,}張"
-    )
-
+    lines.append(f"五檔:差 {a['spread_pct']}%,量差 {a['bid5_minus_ask5']:+,}張")
     lines.append("")
-    # 明天觀察(抓 LLM「明天觀察重點」區)
+
     obs = ""
     in_obs = False
     for line in llm_output.split("\n"):
@@ -240,25 +197,21 @@ def make_telegram_summary(indicators: dict, llm_output: str) -> str:
                 obs += l[1:].strip() + " / "
                 if len(obs) > 100:
                     break
-    if obs:
-        lines.append(f"👀 明天觀察:{obs[:120]}")
-    else:
-        lines.append("📁 完整報告見 reports/")
+    lines.append(f"👀 明天觀察:{obs[:120]}" if obs else "📁 完整報告見 reports/")
 
     return "\n".join(lines)
 
 
 # ================== md 報告 ==================
-def save_md_report(llm_output: str, indicators: dict, today: str) -> Path:
-    """存完整 md 報告。"""
-    path = _REPORTS_DIR / f"{today}.md"
+def save_md_report(symbol: str, symbol_name: str, llm_output: str, indicators: dict, today: str) -> Path:
+    path = REPORTS_DIR / f"{today}_{symbol}.md"
     a = indicators["group_A_ticks_5snap"]
     b = indicators["group_B_institutional"]
     c = indicators["group_C_margin_short"]
     d = indicators["group_D_market_index"]
 
-    content = f"""# {SYMBOL} {SYMBOL_NAME} 盤後分析報告
-**日期:** {today}  
+    content = f"""# {symbol} {symbol_name} 盤後分析報告
+**日期:** {today}
 **生成時間:** {datetime.now().strftime("%H:%M:%S")}
 
 ---
@@ -319,31 +272,23 @@ def save_md_report(llm_output: str, indicators: dict, today: str) -> Path:
 
 ---
 
-*自動生成 by backtrack.py(cron 17:00)*
+*自動生成 by analysis/backtrack.py(cron 17:00)*
 """
     path.write_text(content, encoding="utf-8")
     return path
 
 
-# ================== 主流程 ==================
-def run(symbol: str = SYMBOL, target_date: Optional[str] = None) -> bool:
-    """
-    主流程:
-      1. 抓 ticks
-      2. 抓 TWSE
-      3. 算指標
-      4. RAG
-      5. LLM
-      6. Telegram
-      7. md
-    """
+# ================== 單一標的主流程 ==================
+def run(symbol: str, target_date: Optional[str] = None) -> bool:
     if target_date is None:
         target_date = date.today().isoformat()
 
-    log.info(f"=== 盤後分析啟動 {target_date} ===")
+    stock_cfg = config.get_stock(symbol)
+    symbol_name = stock_cfg.get("name", symbol) if stock_cfg else symbol
 
-    # 1) ticks
-    from ticks_fetcher import fetch_ticks, load_ticks_from_db, load_snapshot_from_db
+    log.info(f"=== 盤後分析啟動 {symbol}({symbol_name}) {target_date} ===")
+
+    from data.ticks import fetch_ticks, load_ticks_from_db, load_snapshot_from_db
     tick_data = fetch_ticks(symbol, target_date)
     if not tick_data or tick_data.get("tick_count", 0) == 0:
         log.error("❌ ticks 抓取失敗,中止")
@@ -353,51 +298,54 @@ def run(symbol: str = SYMBOL, target_date: Optional[str] = None) -> bool:
     snap = load_snapshot_from_db(symbol, target_date)
     log.info(f"  ticks: {len(ticks)} 筆,快照: {'有' if snap else '無'}")
 
-    # 2) TWSE
-    from twse_fetcher import fetch_institutional_3instit, fetch_margin_short
+    from data.twse import fetch_institutional_3instit, fetch_margin_short
     inst = fetch_institutional_3instit(target_date)
     ms = fetch_margin_short(symbol, target_date)
 
-    # 2b) 大盤指數(v6.1 改用 FMTQIK)
-    from market_index_fetcher import fetch_market_index
+    from data.market import fetch_market_index
     market = fetch_market_index(target_date)
     log.info(f"  大盤: {'有' if market else '無'}")
 
-    # 3) 指標(v6.1 刪除 OI)
-    from indicators import calc_all
+    from data.indicators import calc_all
     indicators = calc_all(ticks, snap, inst, ms, market, symbol)
-    log.info(f"  指標算完:總計 32 項(組 A 15 / B 6 / C 5 / D 6)")
+    log.info("  指標算完:組 A / B / C / D")
 
-    # 4) RAG — 用傳入的 symbol 查詢,避免硬寫 SYMBOL_NAME
-    symbol_name = SYMBOL_NAME if symbol == SYMBOL else symbol
     rag_chunks = rag_query(f"盤後分析 {symbol_name} 主力 法人 籌碼", top_k=3)
     log.info(f"  RAG 命中 {len(rag_chunks)} 段")
 
-    # 5) LLM
-    user_prompt = build_user_prompt(indicators, rag_chunks, target_date)
-    llm_output = ask_llm(user_prompt, SYSTEM_PROMPT)
+    user_prompt = build_user_prompt(symbol, symbol_name, indicators, rag_chunks, target_date)
+    llm_output = ask_backtrack(user_prompt, SYSTEM_PROMPT)
     log.info(f"  LLM 分析完成({len(llm_output)} 字)")
 
-    # 6) Telegram
-    from telegram_safety import safe_send
-    summary = make_telegram_summary(indicators, llm_output)
+    summary = make_telegram_summary(symbol, symbol_name, indicators, llm_output)
     safe_send(summary)
-    log.info(f"  Telegram 短報已送")
+    log.info("  Telegram 短報已送")
 
-    # 7) md
-    md_path = save_md_report(llm_output, indicators, target_date)
+    md_path = save_md_report(symbol, symbol_name, llm_output, indicators, target_date)
     log.info(f"  md 報告: {md_path}")
 
-    log.info("=== 盤後分析完成 ===")
+    log.info(f"=== {symbol} 盤後分析完成 ===")
     return True
+
+
+# ================== 全部監控標的 ==================
+def run_all(target_date: Optional[str] = None) -> dict[str, bool]:
+    """對 config/watchlist.json 內所有標的各跑一輪盤後分析。"""
+    results = {}
+    for stock in config.stocks:
+        symbol = stock["symbol"]
+        try:
+            results[symbol] = run(symbol, target_date)
+        except Exception as e:
+            log.error(f"❌ {symbol} 盤後分析例外: {e}", exc_info=True)
+            results[symbol] = False
+    return results
 
 
 if __name__ == "__main__":
     import sys
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
     target = sys.argv[1] if len(sys.argv) > 1 else date.today().isoformat()
-    ok = run(SYMBOL, target)
-    sys.exit(0 if ok else 1)
+    outcomes = run_all(target)
+    log.info(f"=== 全部完成:{outcomes} ===")
+    sys.exit(0 if all(outcomes.values()) else 1)
