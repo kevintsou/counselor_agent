@@ -14,6 +14,7 @@ import logging
 import multiprocessing
 import signal
 import time
+from collections import deque
 from datetime import datetime, timedelta
 
 from broker import broker
@@ -44,6 +45,12 @@ class Sentinel:
 
         # tick 流量狀態(watchdog 用)
         self._last_tick_ts: dict[str, datetime] = {}
+
+        # 餵 LLM 用的即時盤面:每檔最新五檔 + 滾動逐筆 tape(觸發時一起傳給子進程)
+        # detector 觸發後會清空自己的 buffer,所以 tape 獨立維護,保留最近 60 筆不受影響
+        self._last_bidask: dict[str, dict] = {}
+        self._tape: dict[str, deque] = {}
+        self.TAPE_MAXLEN = 60
 
         # 子進程通訊:multiprocessing.Queue 讓 strategist 有獨立 GIL,不與 Shioaji tokio runtime 搶鎖
         self.trigger_queue: multiprocessing.Queue = multiprocessing.Queue(maxsize=100)
@@ -84,6 +91,24 @@ class Sentinel:
                 pass
             self._strategist_proc = self._spawn_strategist()
 
+    # ── Shioaji BidAsk callback(五檔盤口,餵 LLM 用)──────────
+    def on_bidask(self, exchange, bidask):
+        """Shioaji BidAskSTKv1 callback。只快取每檔最新五檔,供觸發時附帶給 LLM。
+
+        不做任何偵測/推播,盡量輕量,避免拖慢盤口串流。
+        """
+        try:
+            symbol = str(bidask.code)
+            self._last_bidask[symbol] = {
+                "bid_price": [float(p) for p in bidask.bid_price],
+                "bid_volume": [int(v) for v in bidask.bid_volume],
+                "ask_price": [float(p) for p in bidask.ask_price],
+                "ask_volume": [int(v) for v in bidask.ask_volume],
+                "ts": datetime.now().strftime("%H:%M:%S"),
+            }
+        except Exception as e:
+            log.debug(f"on_bidask 處理失敗: {e}")
+
     # ── Shioaji Tick callback ────────────────────────────────
     def on_tick(self, exchange, tick):
         """Shioaji TickSTKv1 callback。只負責偵測 + 推 multiprocessing.Queue;
@@ -104,6 +129,10 @@ class Sentinel:
             self.price_monitor.update_price(symbol, price)
             ts = datetime.now()
 
+            # 滾動逐筆 tape:每筆都記,保留最近 TAPE_MAXLEN 筆(觸發後 detector buffer 會清空,tape 不受影響)
+            tape = self._tape.setdefault(symbol, deque(maxlen=self.TAPE_MAXLEN))
+            tape.append({"ts": ts.strftime("%H:%M:%S"), "qty": qty, "side": side, "price": price})
+
             sig, detail = self.detector.feed(symbol, ts, qty, side, price)
             if sig:
                 if not self.cooldown_gate.allow(symbol, sig):
@@ -113,6 +142,9 @@ class Sentinel:
                     self.trigger_queue.put_nowait({
                         "symbol": symbol, "sig": sig, "detail": detail,
                         "qty": qty, "side": side, "price": price, "ts": ts.isoformat(),
+                        # 餵 LLM 的加料:觸發當下五檔盤口 + 最近逐筆 tape
+                        "bidask": self._last_bidask.get(symbol),
+                        "tape": list(tape),
                     })
                     log.info(f"  📥 {symbol} {sig} 推入子進程 queue")
                 except Exception as e:
@@ -150,10 +182,14 @@ class Sentinel:
         removed = old_syms - new_syms
         for sym in added:
             if broker.subscribe_tick(sym, self.on_tick):
-                log.info(f"  ➕ 熱重載新增訂閱 {sym}")
+                broker.subscribe_bidask(sym, self.on_bidask)
+                log.info(f"  ➕ 熱重載新增訂閱 {sym}(tick + bidask)")
         for sym in removed:
             broker.unsubscribe_tick(sym)
+            broker.unsubscribe_bidask(sym)
             self._last_tick_ts.pop(sym, None)
+            self._last_bidask.pop(sym, None)
+            self._tape.pop(sym, None)
             self.price_monitor.forget(sym)
             log.info(f"  ➖ 熱重載取消訂閱 {sym}")
         self.stocks = new_stocks
@@ -280,7 +316,9 @@ class Sentinel:
 
         for s in self.stocks:
             if not broker.subscribe_tick(s["symbol"], self.on_tick):
-                log.warning(f"  ⚠️ {s['symbol']} 訂閱失敗,跳過")
+                log.warning(f"  ⚠️ {s['symbol']} tick 訂閱失敗,跳過")
+            # 五檔盤口:訂閱失敗不影響觸發,只是 LLM 少一份盤口資料
+            broker.subscribe_bidask(s["symbol"], self.on_bidask)
 
         hc = config.health_check_config()
         health_check_sec = hc.get("interval_sec", 10)

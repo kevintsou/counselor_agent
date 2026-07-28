@@ -14,6 +14,8 @@
     "side": str,      # "buy" / "sell" / "unknown"
     "price": float,
     "ts": str,        # ISO 格式時間戳
+    "bidask": dict,   # 觸發當下五檔盤口(可能為 None,盤口串流未到)
+    "tape": list,     # 最近逐筆 tape [{ts, qty, side, price}, ...],供 LLM 判斷節奏
 }
 """
 import logging
@@ -83,10 +85,12 @@ def run_forever(task_queue: Queue):
                 "price": task.get("price", 0),
                 "rule": sig,
                 "trigger_detail": task.get("detail", {}),
+                "bidask": task.get("bidask"),
+                "tape": task.get("tape", []),
             }
             order = ask_strategist(symbol, sig.lower(), snapshot)
             log.info(f"  📜 軍師回應 {symbol} ({len(order)} 字)")
-            sent = send_order(symbol, order, detail=task.get("detail"))
+            sent = send_order(symbol, order, detail=task.get("detail"), bidask=task.get("bidask"))
             log.info(f"  📤 Telegram 推播 {'✅' if sent else '❌'}")
         except Exception as e:
             log.error(f"❌ 處理 {symbol} {sig} 失敗: {e}")

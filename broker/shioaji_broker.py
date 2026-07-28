@@ -236,8 +236,22 @@ class Broker:
             log.error(f"訂閱 bidask 失敗 ({symbol}): {e}")
             return False
 
+    def unsubscribe_bidask(self, symbol: str) -> bool:
+        if not self._connected:
+            return False
+        try:
+            contract = self.get_contract(symbol)
+            if not contract:
+                return False
+            self._api.unsubscribe(contract, quote_type="bidask")
+            log.info(f"📴 已取消訂閱 {symbol} bidask")
+            return True
+        except Exception as e:
+            log.error(f"取消訂閱 bidask 失敗 ({symbol}): {e}")
+            return False
+
     def get_snapshot(self, symbol: str) -> Optional[dict]:
-        """取得當前快照(價格/量/五檔)。"""
+        """取得當前快照(價格/量;五檔請改用 bidask 串流訂閱)。"""
         if not self._connected:
             return None
         try:

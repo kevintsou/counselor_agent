@@ -17,7 +17,7 @@ import urllib.request
 from datetime import datetime
 from typing import Optional
 
-from config import STATE_DIR, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import STATE_DIR, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, config
 
 log = logging.getLogger("counselor.herald")
 
@@ -67,43 +67,128 @@ def send(msg: str, parse_mode: Optional[str] = "Markdown") -> bool:
         return False
 
 
-def send_order(symbol: str, order: str, detail: dict | None = None) -> bool:
-    """推播軍師密令(會自動加抬頭 + 觸發條件明細)。"""
-    header = f"🧭 軍師密令 — {symbol}\n"
-    if detail:
-        header += "\n📊 觸發條件明細:\n" + _format_detail_compact(detail) + "\n"
+_ACTION_STYLE = {"買": ("🟢", "買進"), "賣": ("🔴", "賣出"), "觀望": ("⚪", "觀望")}
+
+
+def _fmt_money(twd) -> str:
+    """金額換算億/萬,盤中一眼看懂量級。"""
+    v = float(twd or 0)
+    if abs(v) >= 1e8:
+        return f"約 {v / 1e8:.2f} 億"
+    if abs(v) >= 1e4:
+        return f"約 {v / 1e4:.0f} 萬"
+    return f"${v:,.0f}"
+
+
+def _parse_order(text: str) -> dict | None:
+    """解析軍師四欄輸出(動作/研判/失效/風險)。容錯支援【欄名】與「欄名:」兩種寫法;都認不出回 None。"""
+    norm = re.sub(r"【\s*(動作|研判|依據|失效|風險|失效/風險)\s*】", r"\1:", text)
+    out = {"動作": "", "研判": "", "失效": "", "風險": ""}
+    cur = None
+    found = False
+    for raw in norm.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        m = re.match(r"^(動作|研判|依據|失效|風險|失效/風險)\s*[:：]\s*(.*)$", line)
+        if m:
+            found = True
+            key, val = m.group(1), m.group(2).strip()
+            if key == "依據":
+                key = "研判"
+            if key == "失效/風險":  # 舊格式合併欄:整段塞失效,風險留空
+                out["失效"] = val
+                cur = "失效"
+                continue
+            out[key] = val
+            cur = key
+        elif cur:  # 續行(研判可能多行)
+            out[cur] += " " + line
+    return out if found else None
+
+
+def _action_style(action_text: str) -> tuple[str, str]:
+    for kw, (emoji, label) in _ACTION_STYLE.items():
+        if kw in action_text:
+            return emoji, label
+    return "🔔", action_text or "研判"
+
+
+def _format_bidask_compact(ba: dict | None) -> str:
+    """Telegram 精簡盤口:最佳買賣一檔 + 五檔總量失衡(完整五檔給 LLM,不塞給人看)。"""
+    if not ba:
+        return ""
+    bp, bv = ba.get("bid_price", []), ba.get("bid_volume", [])
+    ap, av = ba.get("ask_price", []), ba.get("ask_volume", [])
+    if not (bp and ap):
+        return ""
+    lines = [f"📖 盤口　委買 {bp[0]:.2f}×{bv[0]} / 委賣 {ap[0]:.2f}×{av[0]}"]
+    tot_b, tot_a = sum(bv), sum(av)
+    if tot_a > 0:
+        imb = tot_b / tot_a
+        arrow = "▲偏買" if imb > 1.3 else "▼偏賣" if imb < 0.77 else "◆均衡"
+        lines.append(f"　　　委買 {tot_b:,} vs 委賣 {tot_a:,} 張　{imb:.1f} 倍 {arrow}")
+    return "\n".join(lines)
+
+
+def send_order(symbol: str, order: str, detail: dict | None = None, bidask: dict | None = None) -> bool:
+    """推播軍師密令。解析四欄 → 結論置頂 + 顏色 + 對齊明細 + 精簡盤口;解析失敗則原文回退。"""
+    stock = config.get_stock(symbol) or {}
+    label = f"{symbol} {stock.get('name', '')}".strip()
+    parsed = _parse_order(order)
     _record_alert("order", symbol, order)
-    return send(header + order)
+
+    if not parsed:  # 解析失敗 → 不丟失 LLM 原文,補抬頭與明細後原樣送出
+        header = f"🧭 軍師密令 — {label}\n"
+        if detail:
+            header += "\n📊 觸發明細\n" + _format_detail_compact(detail) + "\n"
+        ba = _format_bidask_compact(bidask)
+        return send(header + (ba + "\n" if ba else "") + "\n" + order, parse_mode=None)
+
+    emoji, action_label = _action_style(parsed["動作"])
+    lines = [f"{emoji} {action_label} · {label}", "━" * 12]
+    if detail:
+        lines.append(f"{detail.get('triggered_at', '-')}　{detail.get('rule', '?')} 觸發")
+        lines.append("")
+        lines.append("📊 觸發明細")
+        lines.append(_format_detail_compact(detail))
+    ba = _format_bidask_compact(bidask)
+    if ba:
+        lines += ["", ba]
+    lines += ["", "🧭 軍師研判", f"　{parsed['研判'] or '(無)'}"]
+    if parsed["失效"]:
+        lines += ["", f"🎯 失效　{parsed['失效']}"]
+    if parsed["風險"]:
+        lines.append(f"⚠️ 風險　{parsed['風險']}")
+    return send("\n".join(lines), parse_mode=None)
 
 
 def _format_detail_compact(detail: dict) -> str:
-    """精簡版觸發明細(給 Telegram 看,行數控制 5-12 行)。"""
+    """精簡觸發明細:兩欄對齊 + 千分位 + 市值億/萬 + 超門檻倍數。"""
     if not detail:
-        return "(無)"
-    lines = []
-    lines.append(f"  規則: {detail.get('rule', '?')} @ {detail.get('triggered_at', '-')}")
-    lines.append(f"  成交: 價 {detail.get('price', '?')} / 量 {detail.get('qty', '?')}張 / {detail.get('side', '?')}")
+        return "　(無)"
+    lines = [f"　成交　價 {detail.get('price', '?')} / 量 {detail.get('qty', '?')} 張 / {detail.get('side', '?')}"]
     for rule_key in ("R1", "R2", "R3", "R4"):
         d = detail.get(rule_key)
         if not d:
             continue
         if rule_key in ("R1", "R2"):
             lines.append(
-                f"  {rule_key}: {d['count']}筆 (需≥{d['required_count']}) "
-                f"/ 總{d['total_lots']}張 / max {d['max_lot']}張 "
-                f"/ 價區 {d['price_low']}~{d['price_high']}"
+                f"　{rule_key}　{d['count']} 筆(需≥{d['required_count']})· "
+                f"總 {d['total_lots']:,} 張 · 最大 {d['max_lot']:,}"
             )
+            lines.append(f"　　　價區 {d['price_low']}~{d['price_high']}")
         elif rule_key == "R3":
             ratio = d['buy_sell_ratio'] if d['buy_sell_ratio'] is not None else '∞'
-            mv = d['market_value_twd']
+            over = d['net_lots'] / d['threshold_lots'] if d['threshold_lots'] else 0
+            lines.append(f"　R3　淨買 {d['net_lots']:,} 張(門檻 {d['threshold_lots']:.0f},超 {over:.1f} 倍)")
             lines.append(
-                f"  R3: 買{d['buy_lots']} / 賣{d['sell_lots']} / 淨{d['net_lots']}張 "
-                f"(門檻{d['threshold_lots']}) / 比{ratio} / 市值${mv:,.0f}"
+                f"　　　買 {d['buy_lots']:,} / 賣 {d['sell_lots']:,} · 比 {ratio} · 市值 {_fmt_money(d['market_value_twd'])}"
             )
         elif rule_key == "R4":
             lines.append(
-                f"  R4: counter {d['counter']} (需>{d['required_counter']}) "
-                f"/ 買+{d['buy_hits']}次 / 賣-{d['sell_hits']}次"
+                f"　R4　counter {d['counter']}(需>{d['required_counter']})· "
+                f"買+{d['buy_hits']} / 賣-{d['sell_hits']}"
             )
     return "\n".join(lines)
 

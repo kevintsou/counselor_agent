@@ -92,19 +92,56 @@ def _format_trigger_detail(detail: dict) -> str:
     return "\n".join(lines)
 
 
-SYSTEM_PROMPT_STRATEGIST = """你是台股盤中 AI 軍師,協助 Kevin 判斷是否進場。
+def _format_bidask(bidask: dict) -> str:
+    """把五檔盤口格式化成人讀表格 + 委買委賣力道,讓 LLM 判斷盤口厚薄與失衡。"""
+    if not bidask:
+        return "(無五檔資料,盤口串流未到)"
+    bp, bv = bidask.get("bid_price", []), bidask.get("bid_volume", [])
+    ap, av = bidask.get("ask_price", []), bidask.get("ask_volume", [])
+    tot_b, tot_a = sum(bv), sum(av)
+    lines = [f"  盤口時間: {bidask.get('ts', '-')}"]
+    lines.append("  委賣(由內而外):" + " / ".join(f"{p:.2f}×{v}" for p, v in zip(ap, av)))
+    lines.append("  委買(由內而外):" + " / ".join(f"{p:.2f}×{v}" for p, v in zip(bp, bv)))
+    if tot_a > 0:
+        imb = tot_b / tot_a
+        bias = "偏買方(下檔委買厚)" if imb > 1.3 else "偏賣方(上檔委賣壓)" if imb < 0.77 else "均衡"
+        lines.append(f"  五檔總量: 委買 {tot_b} 張 vs 委賣 {tot_a} 張 → 買賣力 {imb:.2f} 倍,{bias}")
+    return "\n".join(lines)
 
-【以數據為本(鐵律)】
-- 【依據】必須引用觸發明細的具體數字(筆數/張數/價區)
-- 【失效】必須給出具體價位,例如「跌破 25.00」
-- 【風險】必須給出具體張數或金額,例如「≤ 2 張(=5.1 萬)」
 
-【輸出格式(嚴格遵守,共 3 行)】
-【動作】買/賣/觀望
-【依據】1 句話,引用關鍵數字 + 主力意圖判斷
-【失效/風險】失效條件(具體價位)/ 若進場單筆上限
+def _format_tape(tape: list, limit: int = 40) -> str:
+    """把最近逐筆 tape 格式化,讓 LLM 判斷買賣節奏(加速/衰竭/對敲)。"""
+    if not tape:
+        return "(無逐筆資料)"
+    recent = tape[-limit:]
+    buy_lots = sum(t["qty"] for t in recent if t["side"] == "buy")
+    sell_lots = sum(t["qty"] for t in recent if t["side"] == "sell")
+    lines = [f"  近 {len(recent)} 筆:買 {buy_lots} 張 / 賣 {sell_lots} 張 / 淨 {buy_lots - sell_lots} 張"]
+    tape_str = " ".join(
+        f"{'▲' if t['side'] == 'buy' else '▼' if t['side'] == 'sell' else '·'}{t['qty']}@{t['price']:.2f}"
+        for t in recent
+    )
+    lines.append(f"  流水: {tape_str}")
+    return "\n".join(lines)
 
-總長 50-100 字。拒絕廢話,拒絕換行堆砌。
+
+SYSTEM_PROMPT_STRATEGIST = """你是台股盤中 AI 軍師,協助 Kevin 判斷是否進場。你會拿到三層即時數據,必須綜合研判,不能只看單一層:
+  1) 觸發明細 — 觸發當下的主力大單(筆數/張數/淨買/市值)
+  2) 五檔盤口 — 委買委賣力道與厚薄,判斷上下檔支撐壓力
+  3) 逐筆 tape — 近數十筆買賣流向,判斷節奏是加速、衰竭、還是對敲假單
+
+【研判要領(這是你的核心價值)】
+- 三層互相印證還是背離?例:大單狂買但委賣壓境、或逐筆買盤在衰竭 → 要點出來,別只看觸發張數就喊買。
+- 主力意圖:單向吃貨 / 拉高出貨 / 洗盤 / 假單對敲?用盤口與 tape 佐證。
+- 給出「為什麼」,不是複述數字。數字系統已呈現,你負責解讀。
+
+【輸出格式(嚴格四欄,每欄「欄名:內容」各一行)】
+動作: 買 / 賣 / 觀望
+研判: 2-4 句完整解讀,綜合大單+五檔+逐筆,講清楚主力意圖與力道,可引用關鍵數字佐證
+失效: 具體價位,例如「跌破 20.00 轉弱」
+風險: 具體張數或金額,例如「單筆 ≤ 2 張(≈4.1 萬)」
+
+研判可以完整,動作/失效/風險三欄務必精簡。不要用 Markdown 符號,不要空行堆砌。
 """
 
 
@@ -129,15 +166,30 @@ def ask_strategist(symbol: str, signal: str, snapshot: dict) -> str:
     trigger_detail = snapshot.pop("trigger_detail", {})
     detail_text = _format_trigger_detail(trigger_detail) if trigger_detail else "(無觸發明細)"
 
-    snap_text = "\n".join(f"  {k}: {v}" for k, v in snapshot.items() if k != "trigger_detail")
+    # 五檔盤口 + 逐筆 tape(這次新增,讓 LLM 做更完整判斷)
+    bidask = snapshot.pop("bidask", None)
+    tape = snapshot.pop("tape", [])
+    bidask_text = _format_bidask(bidask)
+    tape_text = _format_tape(tape)
+
+    snap_text = "\n".join(
+        f"  {k}: {v}" for k, v in snapshot.items()
+        if k not in ("trigger_detail", "bidask", "tape")
+    )
     user_msg = f"""標的: {symbol}
 訊號等級: {signal.upper()}
 觸發規則: {trigger_detail.get('rule', signal.upper())}
 觸發時間: {trigger_detail.get('triggered_at', '-')}
 最新成交價: {trigger_detail.get('price', snapshot.get('price', '?'))}
 
-【觸發條件明細(必讀,請引用具體數字)】:
+【第一層 · 觸發條件明細(主力大單)】:
 {detail_text}
+
+【第二層 · 五檔盤口(委買委賣力道)】:
+{bidask_text}
+
+【第三層 · 逐筆 tape(買賣節奏)】:
+{tape_text}
 
 盤面快照:
 {snap_text}
@@ -145,7 +197,7 @@ def ask_strategist(symbol: str, signal: str, snapshot: dict) -> str:
 相關書節:
 {rag_text}
 
-請下密令(依據請引用上述數字):"""
+請綜合三層數據下密令(研判要點出三層是否印證或背離):"""
 
     return _call(
         SYSTEM_PROMPT_STRATEGIST, user_msg,
