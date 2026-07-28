@@ -114,82 +114,88 @@ def _action_style(action_text: str) -> tuple[str, str]:
     return "🔔", action_text or "研判"
 
 
-def _format_bidask_compact(ba: dict | None) -> str:
-    """Telegram 精簡盤口:最佳買賣一檔 + 五檔總量失衡(完整五檔給 LLM,不塞給人看)。"""
+def _ratio_str(ratio) -> str:
+    """買賣比顯示:None(無賣單)→ ∞,整數去小數(89 不是 89.0),其餘原樣。"""
+    if ratio is None:
+        return "∞"
+    return f"{ratio:g}" if isinstance(ratio, (int, float)) else str(ratio)
+
+
+def _format_bidask_compact(ba: dict | None) -> list[str]:
+    """Telegram 精簡盤口 body:最佳一檔 + 五檔失衡,每行短、靠左(手機不折行)。回傳行 list,無資料回 []。"""
     if not ba:
-        return ""
+        return []
     bp, bv = ba.get("bid_price", []), ba.get("bid_volume", [])
     ap, av = ba.get("ask_price", []), ba.get("ask_volume", [])
     if not (bp and ap):
-        return ""
-    lines = [f"📖 盤口　委買 {bp[0]:.2f}×{bv[0]} / 委賣 {ap[0]:.2f}×{av[0]}"]
+        return []
+    lines = [f"委買　{bp[0]:.2f} × {bv[0]}", f"委賣　{ap[0]:.2f} × {av[0]}"]
     tot_b, tot_a = sum(bv), sum(av)
     if tot_a > 0:
         imb = tot_b / tot_a
         arrow = "▲偏買" if imb > 1.3 else "▼偏賣" if imb < 0.77 else "◆均衡"
-        lines.append(f"　　　委買 {tot_b:,} vs 委賣 {tot_a:,} 張　{imb:.1f} 倍 {arrow}")
-    return "\n".join(lines)
+        lines.append(f"力道　{imb:.1f} 倍 {arrow}")
+    return lines
 
 
 def send_order(symbol: str, order: str, detail: dict | None = None, bidask: dict | None = None) -> bool:
-    """推播軍師密令。解析四欄 → 結論置頂 + 顏色 + 對齊明細 + 精簡盤口;解析失敗則原文回退。"""
+    """推播軍師密令。手機優先版面:結論置頂+顏色、每行短標籤靠左、分區塊;解析失敗則原文回退。"""
     stock = config.get_stock(symbol) or {}
     label = f"{symbol} {stock.get('name', '')}".strip()
     parsed = _parse_order(order)
     _record_alert("order", symbol, order)
+    ba_lines = _format_bidask_compact(bidask)
 
     if not parsed:  # 解析失敗 → 不丟失 LLM 原文,補抬頭與明細後原樣送出
-        header = f"🧭 軍師密令 — {label}\n"
+        blocks = [f"🧭 軍師密令　{label}"]
         if detail:
-            header += "\n📊 觸發明細\n" + _format_detail_compact(detail) + "\n"
-        ba = _format_bidask_compact(bidask)
-        return send(header + (ba + "\n" if ba else "") + "\n" + order, parse_mode=None)
+            blocks.append("📊 觸發明細\n" + _format_detail_compact(detail))
+        if ba_lines:
+            blocks.append("📖 五檔盤口\n" + "\n".join(ba_lines))
+        blocks.append(order)
+        return send("\n\n".join(blocks), parse_mode=None)
 
     emoji, action_label = _action_style(parsed["動作"])
-    lines = [f"{emoji} {action_label} · {label}", "━" * 12]
+    when = f"⏰ {detail.get('triggered_at', '-')}　{detail.get('rule', '?')} 觸發" if detail else ""
+    # 用空行分區塊;每區塊內行都短、靠左,手機折行也不歪
+    blocks = ["\n".join(x for x in [f"{emoji} {action_label}　{label}", "━━━━━━━━", when] if x)]
     if detail:
-        lines.append(f"{detail.get('triggered_at', '-')}　{detail.get('rule', '?')} 觸發")
-        lines.append("")
-        lines.append("📊 觸發明細")
-        lines.append(_format_detail_compact(detail))
-    ba = _format_bidask_compact(bidask)
-    if ba:
-        lines += ["", ba]
-    lines += ["", "🧭 軍師研判", f"　{parsed['研判'] or '(無)'}"]
-    if parsed["失效"]:
-        lines += ["", f"🎯 失效　{parsed['失效']}"]
-    if parsed["風險"]:
-        lines.append(f"⚠️ 風險　{parsed['風險']}")
-    return send("\n".join(lines), parse_mode=None)
+        blocks.append("📊 觸發明細\n" + _format_detail_compact(detail))
+    if ba_lines:
+        blocks.append("📖 五檔盤口\n" + "\n".join(ba_lines))
+    blocks.append("🧭 軍師研判\n" + (parsed["研判"] or "(無)"))
+    tail = [x for x in [
+        f"🎯 失效　{parsed['失效']}" if parsed["失效"] else "",
+        f"⚠️ 風險　{parsed['風險']}" if parsed["風險"] else "",
+    ] if x]
+    if tail:
+        blocks.append("\n".join(tail))
+    return send("\n\n".join(blocks), parse_mode=None)
 
 
 def _format_detail_compact(detail: dict) -> str:
-    """精簡觸發明細:兩欄對齊 + 千分位 + 市值億/萬 + 超門檻倍數。"""
+    """精簡觸發明細:每行「短標籤　值」靠左,一件事一行,手機窄螢幕不折行。千分位 + 市值億/萬 + 超門檻倍數。"""
     if not detail:
-        return "　(無)"
-    lines = [f"　成交　價 {detail.get('price', '?')} / 量 {detail.get('qty', '?')} 張 / {detail.get('side', '?')}"]
-    for rule_key in ("R1", "R2", "R3", "R4"):
+        return "(無明細)"
+    lines = [f"成交　{detail.get('price', '?')} × {detail.get('qty', '?')} 張　{detail.get('side', '?')}"]
+    for rule_key in ("R1", "R2"):
         d = detail.get(rule_key)
         if not d:
             continue
-        if rule_key in ("R1", "R2"):
-            lines.append(
-                f"　{rule_key}　{d['count']} 筆(需≥{d['required_count']})· "
-                f"總 {d['total_lots']:,} 張 · 最大 {d['max_lot']:,}"
-            )
-            lines.append(f"　　　價區 {d['price_low']}~{d['price_high']}")
-        elif rule_key == "R3":
-            ratio = d['buy_sell_ratio'] if d['buy_sell_ratio'] is not None else '∞'
-            over = d['net_lots'] / d['threshold_lots'] if d['threshold_lots'] else 0
-            lines.append(f"　R3　淨買 {d['net_lots']:,} 張(門檻 {d['threshold_lots']:.0f},超 {over:.1f} 倍)")
-            lines.append(
-                f"　　　買 {d['buy_lots']:,} / 賣 {d['sell_lots']:,} · 比 {ratio} · 市值 {_fmt_money(d['market_value_twd'])}"
-            )
-        elif rule_key == "R4":
-            lines.append(
-                f"　R4　counter {d['counter']}(需>{d['required_counter']})· "
-                f"買+{d['buy_hits']} / 賣-{d['sell_hits']}"
-            )
+        lines.append(f"{rule_key} 筆　{d['count']} 筆(需≥{d['required_count']})")
+        lines.append(f"張數　總 {d['total_lots']:,} · 最大 {d['max_lot']:,}")
+        lines.append(f"價區　{d['price_low']} ~ {d['price_high']}")
+    d = detail.get("R3")
+    if d:
+        over = d['net_lots'] / d['threshold_lots'] if d['threshold_lots'] else 0
+        lines.append(f"淨買　{d['net_lots']:,} 張")
+        lines.append(f"門檻　{d['threshold_lots']:.0f} 張(超 {over:.1f} 倍)")
+        lines.append(f"買賣　{d['buy_lots']:,} / {d['sell_lots']:,}　比 {_ratio_str(d['buy_sell_ratio'])}")
+        lines.append(f"市值　{_fmt_money(d['market_value_twd'])}")
+    d = detail.get("R4")
+    if d:
+        lines.append(f"累計　{d['counter']}(需>{d['required_counter']})")
+        lines.append(f"買賣次　買+{d['buy_hits']} / 賣-{d['sell_hits']}")
     return "\n".join(lines)
 
 

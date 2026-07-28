@@ -66,10 +66,18 @@ def test_action_style_colors():
 def test_bidask_compact_imbalance():
     ba = {"bid_price": [20.5, 20.45], "bid_volume": [45, 30],
           "ask_price": [20.55, 20.6], "ask_volume": [12, 8], "ts": "09:03"}
-    out = h._format_bidask_compact(ba)
-    assert "委買 20.50×45" in out and "偏買" in out
-    assert h._format_bidask_compact(None) == ""  # 無盤口安全回空
+    out = h._format_bidask_compact(ba)  # 回傳行 list
+    joined = "\n".join(out)
+    assert "20.50 × 45" in joined and "偏買" in joined
+    assert h._format_bidask_compact(None) == []  # 無盤口安全回空 list
     print("✅ test_bidask_compact_imbalance")
+
+
+def test_ratio_str_handles_infinity():
+    assert h._ratio_str(None) == "∞"      # 無賣單
+    assert h._ratio_str(89.0) == "89"     # 整數去小數
+    assert h._ratio_str(3.71) == "3.71"
+    print("✅ test_ratio_str_handles_infinity")
 
 
 def test_router_formatters_empty_safe():
@@ -89,5 +97,6 @@ if __name__ == "__main__":
     test_fmt_money_scales()
     test_action_style_colors()
     test_bidask_compact_imbalance()
+    test_ratio_str_handles_infinity()
     test_router_formatters_empty_safe()
     print("\n🎉 全部格式測試通過")
