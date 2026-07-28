@@ -109,7 +109,7 @@ SYSTEM_PROMPT_STRATEGIST = """你是台股盤中 AI 軍師,協助 Kevin 判斷�
 
 
 def ask_strategist(symbol: str, signal: str, snapshot: dict) -> str:
-    """呼叫軍師總司令,回傳 80-180 字密令。"""
+    """呼叫軍師總司令,回傳 50-100 字密令。"""
     llm_cfg = config.llm_config()
 
     try:

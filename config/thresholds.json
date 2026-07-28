@@ -65,7 +65,7 @@
   "llm": {
     "daily_call_limit": 50,
     "monthly_call_alert": 1000,
-    "max_tokens_realtime": 300,
+    "max_tokens_realtime": 500,
     "max_tokens_backtrack": 2000,
     "temperature": 0.3
   },
