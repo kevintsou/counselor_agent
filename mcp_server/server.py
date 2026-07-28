@@ -85,15 +85,27 @@ def trigger_backtrack(symbol: str = "", trade_date: str = "") -> dict:
 
 
 @mcp.tool()
-def update_strategy_threshold(rule: str, params: dict) -> dict:
+def get_strategy_thresholds(symbol: str = "") -> dict:
+    """檢視策略門檻。symbol 留空 = 全域預設 + 所有 per-symbol override;指定 = 該股合併後的有效門檻。
+
+    低價股(如凱基 2883)與高價股(如台積 2330)量能差距大,可各自用 override 調校,避免高門檻讓低價股永遠觸發不了。
+    """
+    return tools.get_strategy_thresholds(symbol or None)
+
+
+@mcp.tool()
+def update_strategy_threshold(rule: str, params: dict, symbol: str = "") -> dict:
     """修改 R1/R2/R3/R4 觸發策略的門檻參數(部分更新)。
 
-    例如 rule="R1", params={"min_qty": 60, "min_count": 6}。
+    symbol 留空 = 改全域預設(所有股票);symbol 指定 = 只改該股的 per-symbol override(互不影響)。
+    例:
+      rule="R1", params={"min_qty": 60}                    改全域
+      rule="R3", params={"amount_divisor": 20000}, symbol="2883"   只調凱基
     R1/R2 欄位: window_sec, min_qty, min_count
     R3 欄位: window_sec, amount_divisor, cooldown_sec
     R4 欄位: window_sec, min_qty, trigger_count
     """
-    return tools.update_strategy_threshold(rule, params)
+    return tools.update_strategy_threshold(rule, params, symbol or None)
 
 
 @mcp.tool()

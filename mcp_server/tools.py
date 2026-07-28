@@ -112,18 +112,43 @@ def trigger_backtrack(symbol: Optional[str] = None, trade_date: Optional[str] = 
     return run_all(trade_date)
 
 
-def update_strategy_threshold(rule: str, params: dict) -> dict:
+def update_strategy_threshold(rule: str, params: dict, symbol: Optional[str] = None) -> dict:
     """修改 R1/R2/R3/R4 其中一條規則的門檻(部分欄位更新,未提供的欄位維持原值)。
 
-    例: update_strategy_threshold("R1", {"min_qty": 60}) 只改 min_qty,其餘沿用。
+    symbol 省略 → 改全域預設(所有股票);
+    symbol 指定 → 只改該股的 per-symbol override(高價/低價股可各自調校,互不影響)。
+    例:
+      update_strategy_threshold("R1", {"min_qty": 60})              改全域
+      update_strategy_threshold("R3", {"amount_divisor": 20000}, symbol="2883")  只改凱基
     """
     rule = rule.upper()
     if rule not in ("R1", "R2", "R3", "R4"):
         return {"ok": False, "message": "rule 必須是 R1/R2/R3/R4"}
+    if symbol:
+        path = f"strategy_overrides.{symbol}.{rule}"
+        current = dict(config.get(path, {}) or {})
+        current.update(params)
+        config.update(path, current)
+        return {"ok": True, "rule": rule, "symbol": symbol, "override": current,
+                "effective": config.strategy_params(rule, symbol)}
     current = config.strategy_params(rule)
     current.update(params)
     config.update(f"strategy.{rule}", current)
     return {"ok": True, "rule": rule, "new_params": current}
+
+
+def get_strategy_thresholds(symbol: Optional[str] = None) -> dict:
+    """檢視策略門檻。symbol 省略 → 全域預設 + 所有 override;指定 → 該股的有效門檻(全域+override 合併後結果)。"""
+    if symbol:
+        return {
+            "symbol": symbol,
+            "effective": {r: config.strategy_params(r, symbol) for r in ("R1", "R2", "R3", "R4")},
+            "override": config.strategy_overrides(symbol),
+        }
+    return {
+        "global": {r: config.strategy_params(r) for r in ("R1", "R2", "R3", "R4")},
+        "overrides": config.strategy_overrides(),
+    }
 
 
 def update_price_monitor_config(params: dict) -> dict:

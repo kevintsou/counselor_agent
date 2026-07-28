@@ -110,6 +110,43 @@ def test_thresholds_are_config_driven_not_hardcoded():
         config.update("strategy.R1", original)  # 還原,不污染其他測試/正式環境
 
 
+def test_per_symbol_override_merges_over_global():
+    """per-symbol override 只覆蓋列出的欄位,其餘沿用全域;未設 override 的股票回全域。"""
+    glob = config.strategy_params("R1")
+    ov = config.strategy_params("R1", "2883")
+    # 2883 有 R1.min_qty override → 應與全域不同,但其餘欄位(window_sec/min_count)沿用全域
+    assert ov["min_qty"] != glob["min_qty"], "2883 的 R1.min_qty 應被 override"
+    assert ov["window_sec"] == glob["window_sec"], "未 override 的欄位應沿用全域"
+    assert ov["min_count"] == glob["min_count"], "未 override 的欄位應沿用全域"
+    # 沒有 override 的股票 → 完全等於全域
+    assert config.strategy_params("R1", "9999") == glob, "無 override 的股票應回全域"
+    print("✅ test_per_symbol_override_merges_over_global")
+
+
+def test_low_price_stock_triggers_with_override_not_global():
+    """低價股用 override 較低門檻能觸發 R3,同一筆量在全域門檻下不會觸發 → 證明 per-symbol 生效。"""
+    price = 20.0
+    glob_r3 = config.strategy_params("R3")
+    ov_r3 = config.strategy_params("R3", "2883")
+    glob_threshold = glob_r3["amount_divisor"] / price   # 全域:高門檻
+    ov_threshold = ov_r3["amount_divisor"] / price        # 凱基:低門檻
+    assert ov_threshold < glob_threshold, "override 門檻應低於全域"
+    # 選一筆淨買量:高於 override 門檻,但低於全域門檻
+    net = int(ov_threshold) + 100
+    assert net < glob_threshold, "測試前提:此量在全域門檻下不該觸發"
+
+    # 2883(有 override)→ 觸發
+    d1 = StrategyDetector()
+    sig1, _ = d1.feed("2883", datetime.now(), net, "buy", price)
+    assert sig1 == "R3", f"凱基用 override 門檻應觸發 R3,實際: {sig1}"
+
+    # 9999(無 override,走全域)→ 同樣的量不觸發
+    d2 = StrategyDetector()
+    sig2, _ = d2.feed("9999", datetime.now(), net, "buy", price)
+    assert sig2 != "R3", f"無 override 的股票同量不該觸發 R3,實際: {sig2}"
+    print("✅ test_low_price_stock_triggers_with_override_not_global")
+
+
 if __name__ == "__main__":
     test_r1_triggers_on_enough_big_buys()
     test_r1_does_not_trigger_below_threshold()
@@ -119,4 +156,6 @@ if __name__ == "__main__":
     test_auction_window_is_filtered()
     test_cooldown_gate_blocks_within_window()
     test_thresholds_are_config_driven_not_hardcoded()
+    test_per_symbol_override_merges_over_global()
+    test_low_price_stock_triggers_with_override_not_global()
     print("\n🎉 全部單元測試通過")

@@ -168,8 +168,27 @@ class ConfigStore:
         with self._lock:
             return _get(self._thresholds, dotted_path, default)
 
-    def strategy_params(self, rule: str) -> dict:
-        return dict(self.get(f"strategy.{rule}", {}))
+    def strategy_params(self, rule: str, symbol: Optional[str] = None) -> dict:
+        """回傳某條規則的有效門檻。
+
+        優先序:strategy_overrides.<symbol>.<rule> 逐欄覆蓋 strategy.<rule> 全域預設。
+        override 只需列出想改的欄位,其餘沿用全域 → 高價股(台積)用全域,
+        低價股(凱基)用自己的 override,兩檔都能正常觸發。
+        symbol 省略時只回全域預設。
+        """
+        with self._lock:
+            base = dict(_get(self._thresholds, f"strategy.{rule}", {}))
+            if symbol:
+                override = _get(self._thresholds, f"strategy_overrides.{symbol}.{rule}", None)
+                if isinstance(override, dict):
+                    base.update(override)
+            return base
+
+    def strategy_overrides(self, symbol: Optional[str] = None) -> dict:
+        """讀取 per-symbol 門檻 override。symbol 省略回全部;指定則回該股(可能為空 dict)。"""
+        with self._lock:
+            allo = dict(_get(self._thresholds, "strategy_overrides", {}))
+            return dict(allo.get(symbol, {})) if symbol else allo
 
     @property
     def auction_window(self) -> tuple[str, str]:

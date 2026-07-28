@@ -71,7 +71,8 @@ class StrategyDetector:
 
         latest_price = price if price > 0 else 1.0
 
-        r1p, r2p, r3p, r4p = (config.strategy_params(r) for r in ("R1", "R2", "R3", "R4"))
+        # per-symbol 門檻:低價股(如凱基)用自己的 override,高價股(如台積)回退全域
+        r1p, r2p, r3p, r4p = (config.strategy_params(r, symbol) for r in ("R1", "R2", "R3", "R4"))
 
         r1_hit, r1_detail = self._check_window(buf, r1p["window_sec"], r1p["min_qty"], r1p["min_count"], return_detail=True)
         r2_hit, r2_detail = self._check_window(buf, r2p["window_sec"], r2p["min_qty"], r2p["min_count"], return_detail=True)
